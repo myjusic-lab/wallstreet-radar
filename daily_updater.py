@@ -1,23 +1,22 @@
-# daily_updater.py
 import os
+import io
 import time
 import datetime
 import requests
+import pandas as pd
 import yfinance as yf
-from supabase import create_client
+from supabase import create_client, Client
 
+# ==================== 1. 환경변수 및 Supabase 초기화 ====================
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://ookuwqyveokduoqwmksd.supabase.co")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# 하루 1회 전체 스캔할 주요 미국 주식 풀 (확장 가능)
-SCAN_POOL = [
-    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "PLTR", "AMD",
-    "AVGO", "CRWD", "ARM", "IONQ", "SMCI", "RKLB", "NET", "SNOW", "COIN",
-    "SOFI", "PATH", "CELH", "SYM", "MRVL", "APP", "ASTS", "TEM", "HOOD", "RDDT",
-    "QCOM", "INTC", "MU", "TXN", "AMAT", "LRCX", "ADI", "PANW", "FTNT", "ZS"
-]
+if not SUPABASE_KEY:
+    print("⚠️ 경고: SUPABASE_KEY가 설정되지 않았습니다. GitHub Secrets 또는 환경변수를 확인하세요.")
 
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# ==================== 2. 월가 기관 등급 정의 ====================
 TIER_1_FIRMS = [
     "GOLDMAN SACHS", "GOLDMAN", "MORGAN STANLEY", "JP MORGAN", "JPMORGAN",
     "BANK OF AMERICA", "BOFA", "B OF A", "CITIGROUP", "CITI", "BARCLAYS",
@@ -31,9 +30,12 @@ TIER_2_FIRMS = [
 ]
 
 def get_yfinance_session():
+    """Yahoo Finance 봇 차단(429 Rate Limit) 우회용 세션"""
     session = requests.Session()
     session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5"
     })
     return session
 
@@ -45,16 +47,69 @@ def classify_grade(grade_str: str) -> str:
         return "SELL"
     return "HOLD"
 
-def analyze_and_upsert_stock(ticker: str):
+# ==================== 3. S&P 500 & 나스닥 100 티커 자동 수집 ====================
+def fetch_sp500_and_nasdaq100_tickers() -> list:
+    tickers = set()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    }
+
+    # 1) S&P 500 (약 503개)
     try:
-        session = get_yfinance_session()
+        url_sp500 = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+        resp = requests.get(url_sp500, headers=headers, timeout=15)
+        tables = pd.read_html(io.StringIO(resp.text))
+        sp_df = tables[0]
+        sp_tickers = sp_df["Symbol"].str.replace(".", "-", regex=False).tolist()
+        tickers.update(sp_tickers)
+        print(f"✅ S&P 500 티커 수집 완료: {len(sp_tickers)}개")
+    except Exception as e:
+        print(f"⚠️ S&P 500 수집 실패: {e}")
+
+    # 2) 나스닥 100 (약 101개)
+    try:
+        url_ndx = "https://en.wikipedia.org/wiki/Nasdaq-100"
+        resp = requests.get(url_ndx, headers=headers, timeout=15)
+        tables = pd.read_html(io.StringIO(resp.text))
+        for table in tables:
+            if "Ticker" in table.columns:
+                ndx_tickers = table["Ticker"].str.replace(".", "-", regex=False).tolist()
+                tickers.update(ndx_tickers)
+                print(f"✅ 나스닥 100 티커 수집 완료: {len(ndx_tickers)}개")
+                break
+            elif "Symbol" in table.columns:
+                ndx_tickers = table["Symbol"].str.replace(".", "-", regex=False).tolist()
+                tickers.update(ndx_tickers)
+                print(f"✅ 나스닥 100 티커 수집 완료: {len(ndx_tickers)}개")
+                break
+    except Exception as e:
+        print(f"⚠️ 나스닥 100 수집 실패: {e}")
+
+    # 비상용 기본 티커 풀 (크롤링 차단 시 대비)
+    if len(tickers) < 50:
+        fallback = [
+            "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "PLTR", "AMD",
+            "AVGO", "CRWD", "ARM", "IONQ", "SMCI", "RKLB", "NET", "SNOW", "COIN",
+            "SOFI", "PATH", "CELH", "SYM", "MRVL", "APP", "ASTS", "TEM", "HOOD", "RDDT",
+            "QCOM", "INTC", "MU", "TXN", "AMAT", "LRCX", "ADI", "PANW", "FTNT", "ZS"
+        ]
+        tickers.update(fallback)
+
+    final_list = sorted(list(tickers))
+    print(f"🚀 중복 제거 후 최종 스캔 대상: 총 {len(final_list)}개 종목")
+    return final_list
+
+# ==================== 4. 단일 종목 14일 수급 분석 및 DB 저장 ====================
+def analyze_and_upsert_stock(ticker: str, session: requests.Session) -> bool:
+    try:
         stock = yf.Ticker(ticker, session=session)
         hist = stock.history(period="3mo", interval="1d")
         if hist.empty:
-            return
+            return False
 
         current_price = 0.0
         target_mean, target_median, target_high, target_low = 0.0, 0.0, 0.0, 0.0
+        
         try:
             info = stock.info
             current_price = float(info.get('currentPrice', info.get('regularMarketPrice', 0.0)))
@@ -79,6 +134,7 @@ def analyze_and_upsert_stock(ticker: str):
         target_prices_14d = []
 
         score = 40.0
+
         try:
             upgrades = stock.upgrades_downgrades
             if upgrades is not None and not upgrades.empty:
@@ -105,7 +161,8 @@ def analyze_and_upsert_stock(ticker: str):
                             except Exception:
                                 pass
 
-                    if not firm or firm in seen_firms: continue
+                    if not firm or firm in seen_firms:
+                        continue
                     seen_firms.add(firm)
 
                     firm_upper = firm.upper()
@@ -194,16 +251,39 @@ def analyze_and_upsert_stock(ticker: str):
             "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
         }
         supabase.table("stock_analysis").upsert(row_data).execute()
-        print(f"[{ticker}] 일일 분석 업데이트 완료 (점수: {final_score}점)")
+        return True
     except Exception as e:
-        print(f"[{ticker}] 업데이트 실패: {e}")
+        print(f"[{ticker}] 처리 중 에러: {e}")
+        return False
 
+# ==================== 5. 전체 배치 실행 ====================
 def run_daily_batch():
-    print("=== 미국 전 종목 일일 정기 분석 시작 ===")
-    for ticker in SCAN_POOL:
-        analyze_and_upsert_stock(ticker)
-        time.sleep(1.5)  # 429 차단 방지 지연
-    print("=== 일일 정기 분석 완료 ===")
+    start_time = time.time()
+    print("==================================================")
+    print("📈 Wall Street Radar 일일 정기 분석 배치 시작")
+    print("==================================================")
+
+    scan_pool = fetch_sp500_and_nasdaq100_tickers()
+    session = get_yfinance_session()
+    
+    success_count = 0
+    total = len(scan_pool)
+
+    for idx, ticker in enumerate(scan_pool, 1):
+        ok = analyze_and_upsert_stock(ticker, session)
+        if ok:
+            success_count += 1
+            print(f"[{idx}/{total}] ✅ {ticker} 분석 & DB 저장 완료")
+        else:
+            print(f"[{idx}/{total}] ⚠️ {ticker} 분석 건너뜀")
+        
+        # 야후 429 차단 방지 지연 (0.8초)
+        time.sleep(0.8)
+
+    elapsed = round((time.time() - start_time) / 60, 1)
+    print("==================================================")
+    print(f"🎉 일일 배치 완료! (성공: {success_count}/{total}, 소요시간: {elapsed}분)")
+    print("==================================================")
 
 if __name__ == "__main__":
     run_daily_batch()
