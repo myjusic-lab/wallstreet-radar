@@ -5,3 +5,4 @@ plotly
 supabase
 requests
 lxml
+matplotlib
