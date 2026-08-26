@@ -15,8 +15,7 @@ st.set_page_config(
     initial_sidebar_state="auto"
 )
 
-# ==================== 1. API 및 서비스 키 설정 (Secrets에서 안전하게 로드) ====================
-# 기본값 (st.secrets가 있으면 우선 적용)
+# ==================== 1. API 및 서비스 키 설정 ====================
 SUPABASE_URL = "https://ookuwqyveokduoqwmksd.supabase.co"
 SUPABASE_KEY = ""
 ONESIGNAL_APP_ID = ""
@@ -28,11 +27,14 @@ if "SUPABASE_KEY" in st.secrets:
 if "ONESIGNAL_APP_ID" in st.secrets:
     ONESIGNAL_APP_ID = st.secrets["ONESIGNAL_APP_ID"]
 
+
 @st.cache_resource
 def init_supabase() -> Client:
     return create_client(SUPABASE_URL, SUPABASE_KEY)
 
+
 supabase = init_supabase()
+
 
 def hash_pw(password: str) -> str:
     return hashlib.sha256(password.encode('utf-8')).hexdigest()
@@ -41,6 +43,8 @@ def hash_pw(password: str) -> str:
 # ==================== 2. OAuth 세션 & OneSignal 웹 푸시 스크립트 ====================
 def inject_onesignal_script(user_email: str):
     """OneSignal 알림 권한 팝업 및 사용자 이메일 태그 등록"""
+    if not ONESIGNAL_APP_ID:
+        return
     components.html(
         f"""
         <script src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js" defer></script>
@@ -53,9 +57,7 @@ def inject_onesignal_script(user_email: str):
                 enable: false,
               }},
             }});
-            // 알림 권한 요청 팝업
             await OneSignal.Notifications.requestPermission();
-            // 해당 기기와 유저 이메일 매핑
             if ("{user_email}") {{
               OneSignal.User.addTag("user_email", "{user_email}");
             }}
@@ -332,7 +334,8 @@ def analyze_stock_full(ticker: str):
                         except (ValueError, TypeError):
                             pass
 
-                if not firm or firm in seen_firms: continue
+                if not firm or firm in seen_firms:
+                    continue
                 seen_firms.add(firm)
 
                 firm_upper = firm.upper()
@@ -379,10 +382,12 @@ def analyze_stock_full(ticker: str):
                             top_tier_buyers_14d.append(firm)
                 elif category == "HOLD":
                     all_14d_hold += 1
-                    if is_top_tier: top_14d_hold += 1
+                    if is_top_tier:
+                        top_14d_hold += 1
                 elif category == "SELL":
                     all_14d_sell += 1
-                    if is_top_tier: top_14d_sell += 1
+                    if is_top_tier:
+                        top_14d_sell += 1
 
         current_price = info.get('currentPrice', info.get('regularMarketPrice', 0))
         target_mean = info.get('targetMeanPrice', 0)
@@ -410,8 +415,10 @@ def analyze_stock_full(ticker: str):
         final_score = int(max(0, score))
 
         top_buyers_all = []
-        if top_tier_buyers_7d: top_buyers_all.append(f"🔥7일: {', '.join(top_tier_buyers_7d)}")
-        if top_tier_buyers_14d: top_buyers_all.append(f"8~14일: {', '.join(top_tier_buyers_14d)}")
+        if top_tier_buyers_7d:
+            top_buyers_all.append(f"🔥7일: {', '.join(top_tier_buyers_7d)}")
+        if top_tier_buyers_14d:
+            top_buyers_all.append(f"8~14일: {', '.join(top_tier_buyers_14d)}")
         buyers_display = " | ".join(top_buyers_all) if top_buyers_all else "-"
 
         return {
@@ -474,16 +481,15 @@ if not st.session_state["user_email"]:
 
     with col2:
         st.markdown(
-            f"""
-            <a href="{google_login_url}" target="_top" style="text-decoration: none;">
-                <button style="width:100%; background-color:#4285F4; color:white; padding:12px; border:none; border-radius:8px; font-weight:bold; cursor:pointer; font-size:15px; display:flex; align-items:center; justify-content:center; gap:10px;">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#FFFFFF"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#FFFFFF"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z" fill="#FFFFFF"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z" fill="#FFFFFF"/></svg>
-                    Google 계정으로 본인인증
-                </button>
-            </a>
+            """
+            <div style="background-color: #1E222D; padding: 25px 30px; border-radius: 16px; text-align: center; border: 1px solid #363C4E; box-shadow: 0 4px 20px rgba(0,0,0,0.3); margin-bottom: 20px;">
+                <h1 style="color: #FFFFFF; font-size: 28px; margin-bottom: 6px;">⚡ Wall Street Radar</h1>
+                <p style="color: #9AA0A6; font-size: 14px; margin: 0;">월가 1·2티어 기관의 14일 수급과 목표가를 추적하는 스마트 레이더</p>
+            </div>
             """,
             unsafe_allow_html=True
         )
+
         tab_login, tab_signup = st.tabs(["🔑 아이디로 로그인", "✨ Google로 회원가입"])
 
         with tab_login:
@@ -510,7 +516,6 @@ if not st.session_state["user_email"]:
             if not st.session_state["google_auth_email"]:
                 st.info("💡 안전한 본인 식별을 위해 Google 계정 인증 후 아이디와 비밀번호를 생성합니다.")
 
-                # 변수 기본값 사전 정의 (NameError 방지)
                 google_login_url = "#"
                 try:
                     REDIRECT_URL = "https://wallstreet-radar.streamlit.app"
@@ -518,7 +523,7 @@ if not st.session_state["user_email"]:
                         "provider": "google",
                         "options": {"redirect_to": REDIRECT_URL}
                     })
-                    if hasattr(auth_res, "url"):
+                    if hasattr(auth_res, "url") and auth_res.url:
                         google_login_url = auth_res.url
                     elif isinstance(auth_res, dict) and "url" in auth_res:
                         google_login_url = auth_res["url"]
@@ -575,7 +580,6 @@ if not st.session_state["user_email"]:
 user_email = st.session_state["user_email"]
 profile = get_user_profile_by_email(user_email)
 
-# 로그인 완료 시 OneSignal 알림 허용 팝업 실행
 inject_onesignal_script(user_email)
 
 my_username = profile["username"] if profile else "User"
@@ -815,7 +819,8 @@ elif menu == "🔥 7일 내 긴급 상향":
                 c2.write(f"• **탑티어 매수사:** {s['탑티어 매수사']}")
 
                 details = [f"- 🔥 {e}" for e in s["최근7일내역"]]
-                if s["8~14일내역"]: details.extend([f"- ⏱️ {e}" for e in s["8~14일내역"]])
+                if s["8~14일내역"]:
+                    details.extend([f"- ⏱️ {e}" for e in s["8~14일내역"]])
                 c3.info("**14일 내 리포트 이력:**\n\n" + "\n".join(details))
                 st.markdown("---")
     else:
@@ -853,9 +858,12 @@ elif menu == "🔍 미국 전 종목 직접 검색 & 차트":
             m3.metric("14일 이내 목표가 평균", res["14D 목표가 평균"])
             m4.metric("14일 이내 최고 / 최저", res["14D 최고/최저"])
             st.write(f"• **탑티어 매수 추천 증권사:** {res['탑티어 매수사']}")
-            if res["최근7일내역"]: st.success("🔥 **최근 7일 이내 긴급 리포트:**\n" + "\n".join([f"- {e}" for e in res["최근7일내역"]]))
-            if res["8~14일내역"]: st.info("⏱️ **8~14일 전 리포트:**\n" + "\n".join([f"- {e}" for e in res["8~14일내역"]]))
-            if not res["has_14d"]: st.warning("⚠️ 최근 14일 이내에 발표된 신규 월가 리포트가 없습니다.")
+            if res["최근7일내역"]:
+                st.success("🔥 **최근 7일 이내 긴급 리포트:**\n" + "\n".join([f"- {e}" for e in res["최근7일내역"]]))
+            if res["8~14일내역"]:
+                st.info("⏱️ **8~14일 전 리포트:**\n" + "\n".join([f"- {e}" for e in res["8~14일내역"]]))
+            if not res["has_14d"]:
+                st.warning("⚠️ 최근 14일 이내에 발표된 신규 월가 리포트가 없습니다.")
             render_stock_chart(search_ticker, res["hist"])
         else:
             st.error("종목 정보를 불러올 수 없습니다. 올바른 티커인지 확인해주세요.")
