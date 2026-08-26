@@ -5,9 +5,9 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import datetime
-import requests
 import hashlib
 import os
+import requests
 from supabase import create_client, Client
 
 st.set_page_config(
@@ -43,7 +43,7 @@ def hash_pw(password: str) -> str:
 
 # ==================== 2. OAuth 세션 & OneSignal 웹 푸시 스크립트 ====================
 def inject_onesignal_script(user_email: str):
-    """OneSignal 알림 권한 팝업 및 사용자 이메일 태그 등록"""
+    """OneSignal Slidedown 웹 푸시 권한 프롬프트 및 사용자 이메일 태그 등록"""
     if not ONESIGNAL_APP_ID:
         return
     components.html(
@@ -54,11 +54,24 @@ def inject_onesignal_script(user_email: str):
           OneSignalDeferred.push(async function(OneSignal) {{
             await OneSignal.init({{
               appId: "{ONESIGNAL_APP_ID}",
-              notifyButton: {{
-                enable: false,
-              }},
+              allowLocalhostAsSecureOrigin: true,
+              promptOptions: {{
+                slidedown: {{
+                  prompts: [
+                    {{
+                      type: "push",
+                      autoPrompt: true,
+                      text: {{
+                        actionMessage: "월가 1·2티어 기관의 신규 리포트 및 목표가 변동 알림을 받으시겠습니까?",
+                        acceptButton: "알림 켜기",
+                        cancelButton: "나중에"
+                      }}
+                    }}
+                  ]
+                }}
+              }}
             }});
-            await OneSignal.Notifications.requestPermission();
+            OneSignal.Slidedown.promptPush();
             if ("{user_email}") {{
               OneSignal.User.addTag("user_email", "{user_email}");
             }}
@@ -262,7 +275,7 @@ def delete_user_stock(user_email: str, ticker: str) -> bool:
         return False
 
 
-# ==================== 5. 퀀트 분석 엔진 ====================
+# ==================== 5. 퀀트 분석 엔진 & DB 연동 캐시 ====================
 TIER_1_FIRMS = [
     "GOLDMAN SACHS", "GOLDMAN", "MORGAN STANLEY", "JP MORGAN", "JPMORGAN",
     "BANK OF AMERICA", "BOFA", "B OF A", "CITIGROUP", "CITI", "BARCLAYS",
@@ -275,14 +288,8 @@ TIER_2_FIRMS = [
     "RBC CAPITAL", "RBC", "KEYBANC", "TRUIST", "BERENBERG", "MACQUARIE"
 ]
 
-WATCHLIST_POOL = [
-    "PLTR", "CRWD", "ARM", "IONQ", "SMCI", "RKLB", "NET", "SNOW",
-    "NVDA", "TSLA", "AMD", "COIN", "SOFI", "PATH", "CELH", "SYM",
-    "MRVL", "APP", "ASTS", "TEM", "HOOD", "RDDT"
-]
 
 def get_yfinance_session():
-    """Yahoo Finance 봇 차단(429 Rate Limit) 우회용 세션"""
     session = requests.Session()
     session.headers.update({
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -290,6 +297,7 @@ def get_yfinance_session():
         "Accept-Language": "en-US,en;q=0.5"
     })
     return session
+
 
 def classify_grade(grade_str: str) -> str:
     g = str(grade_str).upper()
@@ -299,21 +307,18 @@ def classify_grade(grade_str: str) -> str:
         return "SELL"
     return "HOLD"
 
-@st.cache_data(ttl=1800)
-def analyze_stock_full(ticker: str):
+
+def analyze_and_upsert_stock_live(ticker: str):
+    """실시간 분석 후 Supabase stock_analysis 테이블에 Upsert"""
     try:
         session = get_yfinance_session()
         stock = yf.Ticker(ticker, session=session)
-        
-        # 1. 일봉 데이터 조회
         hist = stock.history(period="3mo", interval="1d")
         if hist.empty:
             return None
 
-        # 2. 현재가 안전 추출 (info 차단 시 hist 최신 종가로 대체)
         current_price = 0.0
         target_mean, target_median, target_high, target_low = 0.0, 0.0, 0.0, 0.0
-        
         try:
             info = stock.info
             current_price = float(info.get('currentPrice', info.get('regularMarketPrice', 0.0)))
@@ -327,7 +332,6 @@ def analyze_stock_full(ticker: str):
         if current_price == 0.0 and not hist.empty:
             current_price = float(hist['Close'].iloc[-1])
 
-        # 3. 기관 리포트 조회
         now = datetime.datetime.now()
         seven_days_ago = now - datetime.timedelta(days=7)
         fourteen_days_ago = now - datetime.timedelta(days=14)
@@ -339,7 +343,6 @@ def analyze_stock_full(ticker: str):
         target_prices_14d = []
 
         score = 40.0
-
         try:
             upgrades = stock.upgrades_downgrades
             if upgrades is not None and not upgrades.empty:
@@ -363,7 +366,7 @@ def analyze_stock_full(ticker: str):
                                     row_tp = val
                                     target_prices_14d.append(val)
                                     break
-                            except (ValueError, TypeError):
+                            except Exception:
                                 pass
 
                     if not firm or firm in seen_firms:
@@ -390,36 +393,26 @@ def analyze_stock_full(ticker: str):
                         recent_14d_events.append(event_text)
 
                     if is_within_7d:
-                        if category == "BUY":
-                            score += 25.0 if is_tier1 else (18.0 if is_tier2 else 10.0)
-                        elif category == "HOLD":
-                            score -= 2.0
-                        elif category == "SELL":
-                            score -= 25.0
+                        if category == "BUY": score += 25.0 if is_tier1 else (18.0 if is_tier2 else 10.0)
+                        elif category == "HOLD": score -= 2.0
+                        elif category == "SELL": score -= 25.0
                     else:
-                        if category == "BUY":
-                            score += 12.0 if is_tier1 else (8.0 if is_tier2 else 4.0)
-                        elif category == "HOLD":
-                            score -= 1.0
-                        elif category == "SELL":
-                            score -= 12.0
+                        if category == "BUY": score += 12.0 if is_tier1 else (8.0 if is_tier2 else 4.0)
+                        elif category == "HOLD": score -= 1.0
+                        elif category == "SELL": score -= 12.0
 
                     if category == "BUY":
                         all_14d_buy += 1
                         if is_top_tier:
                             top_14d_buy += 1
-                            if is_within_7d:
-                                top_tier_buyers_7d.append(firm)
-                            else:
-                                top_tier_buyers_14d.append(firm)
+                            if is_within_7d: top_tier_buyers_7d.append(firm)
+                            else: top_tier_buyers_14d.append(firm)
                     elif category == "HOLD":
                         all_14d_hold += 1
-                        if is_top_tier:
-                            top_14d_hold += 1
+                        if is_top_tier: top_14d_hold += 1
                     elif category == "SELL":
                         all_14d_sell += 1
-                        if is_top_tier:
-                            top_14d_sell += 1
+                        if is_top_tier: top_14d_sell += 1
         except Exception:
             pass
 
@@ -430,9 +423,7 @@ def analyze_stock_full(ticker: str):
         else:
             avg_14d, high_14d, low_14d = target_mean, target_high, target_low
 
-        upside_median = round(((target_median - current_price) / current_price) * 100, 1) if (
-                    target_median and current_price) else 0.0
-
+        upside_median = round(((target_median - current_price) / current_price) * 100, 1) if (target_median and current_price) else 0.0
         if upside_median > 0:
             score += min(20.0, (upside_median / 20.0) * 20.0)
 
@@ -443,11 +434,34 @@ def analyze_stock_full(ticker: str):
         final_score = int(max(0, score))
 
         top_buyers_all = []
-        if top_tier_buyers_7d:
-            top_buyers_all.append(f"🔥7일: {', '.join(top_tier_buyers_7d)}")
-        if top_tier_buyers_14d:
-            top_buyers_all.append(f"8~14일: {', '.join(top_tier_buyers_14d)}")
+        if top_tier_buyers_7d: top_buyers_all.append(f"🔥7일: {', '.join(top_tier_buyers_7d)}")
+        if top_tier_buyers_14d: top_buyers_all.append(f"8~14일: {', '.join(top_tier_buyers_14d)}")
         buyers_display = " | ".join(top_buyers_all) if top_buyers_all else "-"
+
+        # DB 저장
+        row_data = {
+            "ticker": ticker,
+            "score": final_score,
+            "current_price": current_price,
+            "target_median": target_median,
+            "upside_median": upside_median,
+            "avg_14d": avg_14d,
+            "high_14d": high_14d,
+            "low_14d": low_14d,
+            "top_14d_bhs": f"{top_14d_buy} / {top_14d_hold} / {top_14d_sell}",
+            "all_14d_bhs": f"{all_14d_buy} / {all_14d_hold} / {all_14d_sell}",
+            "top_buyers": buyers_display,
+            "recent_7d_events": recent_7d_events,
+            "recent_14d_events": recent_14d_events,
+            "downgrades_7d": recent_downgrades_7d,
+            "has_7d": len(recent_7d_events) > 0,
+            "has_14d": total_14d_reports > 0,
+            "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
+        }
+        try:
+            supabase.table("stock_analysis").upsert(row_data).execute()
+        except Exception:
+            pass
 
         return {
             "티커": ticker,
@@ -468,9 +482,41 @@ def analyze_stock_full(ticker: str):
             "has_7d": len(recent_7d_events) > 0,
             "has_14d": total_14d_reports > 0
         }
-    except Exception as e:
-        st.error(f"[{ticker}] 데이터 수집 오류: {e}")
+    except Exception:
         return None
+
+
+@st.cache_data(ttl=60)
+def get_all_db_stock_analysis():
+    """Supabase stock_analysis 테이블에서 520+ 전 종목 분석 결과 초고속 로드"""
+    try:
+        res = supabase.table("stock_analysis").select("*").order("score", desc=True).execute()
+        if res.data:
+            return res.data
+    except Exception:
+        pass
+    return []
+
+
+def format_db_row_to_display(r: dict) -> dict:
+    return {
+        "티커": r["ticker"],
+        "모멘텀 스코어": r["score"],
+        "현재가": f"${float(r.get('current_price', 0)):.2f}",
+        "탑티어 14D (B/H/S)": r.get("top_14d_bhs", "-"),
+        "전체 14D (B/H/S)": r.get("all_14d_bhs", "-"),
+        "총 중앙값 (상승여력)": f"${float(r.get('target_median', 0)):.2f} (+{r.get('upside_median', 0)}%)" if r.get('target_median') else "-",
+        "14D 목표가 평균": f"${float(r.get('avg_14d', 0)):.2f}" if r.get('avg_14d') else "-",
+        "14D 최고/최저": f"${float(r.get('high_14d', 0)):.2f} / ${float(r.get('low_14d', 0)):.2f}" if r.get('high_14d') else "-",
+        "탑티어 매수사": r.get("top_buyers", "-"),
+        "최근7일내역": r.get("recent_7d_events", []) or [],
+        "8~14일내역": r.get("recent_14d_events", []) or [],
+        "downgrades_7d": r.get("downgrades_7d", []) or [],
+        "raw_score": r["score"],
+        "raw_price": float(r.get('current_price', 0)),
+        "has_7d": r.get("has_7d", False),
+        "has_14d": r.get("has_14d", False)
+    }
 
 
 def render_stock_chart(ticker: str, hist: pd.DataFrame):
@@ -492,12 +538,6 @@ def render_stock_chart(ticker: str, hist: pd.DataFrame):
     fig.update_layout(title=f"📊 {ticker} 일봉 차트 (20/50일 이평선)", xaxis_rangeslider_visible=False,
                       margin=dict(l=10, r=10, t=40, b=10), height=420)
     st.plotly_chart(fig, use_container_width=True)
-
-
-@st.cache_data(ttl=1800)
-def get_all_watchlist_results():
-    results = [analyze_stock_full(t) for t in WATCHLIST_POOL]
-    return [r for r in results if r is not None]
 
 
 # ==================== 6. 뷰 분기 (인증 게이트) ====================
@@ -560,7 +600,6 @@ if not st.session_state["user_email"]:
                     st.error(f"OAuth URL 생성 실패: {e}")
 
                 if google_login_url:
-                    # Streamlit 공식 내장 링크 버튼 (차단 없이 즉시 이동)
                     st.link_button(
                         label="🚀 Google 계정으로 본인인증",
                         url=google_login_url,
@@ -660,7 +699,9 @@ if menu == "💼 내 투자 (포트폴리오)":
         if col_in4.button("DB에 저장", use_container_width=True):
             if in_ticker and in_price > 0 and in_qty > 0:
                 if save_user_stock(user_email, in_ticker, in_price, in_qty):
-                    st.success(f"{in_ticker} 저장 완료!")
+                    # 보유 종목 저장 시 실시간 분석도 함께 실행하여 DB 업데이트
+                    analyze_and_upsert_stock_live(in_ticker)
+                    st.success(f"{in_ticker} 저장 및 분석 완료!")
                     st.rerun()
 
         if not port_df.empty:
@@ -678,12 +719,18 @@ if menu == "💼 내 투자 (포트폴리오)":
         total_invested = 0.0
         total_eval = 0.0
 
+        # DB 캐시에서 먼저 로드
+        db_records = {r["ticker"]: format_db_row_to_display(r) for r in get_all_db_stock_analysis()}
+
         for _, row in port_df.iterrows():
             t = row["티커"]
             b_price = float(row["매수가"])
             qty = float(row["수량"])
 
-            res = analyze_stock_full(t)
+            res = db_records.get(t)
+            if not res:
+                res = analyze_and_upsert_stock_live(t)
+
             if res:
                 c_price = res["raw_price"]
                 invested = b_price * qty
@@ -694,9 +741,9 @@ if menu == "💼 내 투자 (포트폴리오)":
                 total_invested += invested
                 total_eval += eval_val
 
-                if res["downgrades_7d"]:
+                if res.get("downgrades_7d"):
                     alerts_downgrade.append(f"🚨 **{t}**: {', '.join(res['downgrades_7d'])} 매도/하향 발생!")
-                if res["has_7d"] and res["raw_score"] >= 80:
+                if res.get("has_7d") and res["raw_score"] >= 80:
                     alerts_upgrade.append(f"🔥 **{t}**: 최근 7일 내 신규 매수 상향 포착 (모멘텀 스코어: {res['모멘텀 스코어']}점)")
 
                 my_holdings_data.append({
@@ -728,11 +775,9 @@ if menu == "💼 내 투자 (포트폴리오)":
 
         st.markdown("---")
 
-        st.dataframe(
-            pd.DataFrame(my_holdings_data).style.background_gradient(subset=["14D 스코어"], cmap="Blues"),
-            use_container_width=True,
-            hide_index=True
-        )
+        if my_holdings_data:
+            df_display = pd.DataFrame(my_holdings_data)
+            st.dataframe(df_display, use_container_width=True, hide_index=True)
     else:
         st.info("현재 등록된 보유 종목이 없습니다. 위의 메뉴를 통해 입력해보세요.")
 
@@ -783,12 +828,17 @@ elif menu == "👥 친구 포트폴리오":
                 f_total_invested = 0.0
                 f_total_eval = 0.0
 
+                db_records = {r["ticker"]: format_db_row_to_display(r) for r in get_all_db_stock_analysis()}
+
                 for _, row in f_port_df.iterrows():
                     t = row["티커"]
                     b_price = float(row["매수가"])
                     qty = float(row["수량"])
 
-                    res = analyze_stock_full(t)
+                    res = db_records.get(t)
+                    if not res:
+                        res = analyze_and_upsert_stock_live(t)
+
                     if res:
                         c_price = res["raw_price"]
                         invested = b_price * qty
@@ -810,31 +860,28 @@ elif menu == "👥 친구 포트폴리오":
                             "목표가 중앙값": res["총 중앙값 (상승여력)"]
                         })
 
-                f_pnl_pct = ((
-                                         f_total_eval - f_total_invested) / f_total_invested) * 100 if f_total_invested > 0 else 0.0
+                f_pnl_pct = ((f_total_eval - f_total_invested) / f_total_invested) * 100 if f_total_invested > 0 else 0.0
 
                 fm1, fm2 = st.columns(2)
                 fm1.metric(f"@{target_f_uname} 총 평가손익", f"${(f_total_eval - f_total_invested):+,.2f}")
                 fm2.metric(f"@{target_f_uname} 총 수익률", f"{f_pnl_pct:+.2f}%")
 
-                st.dataframe(
-                    pd.DataFrame(f_holdings_data).style.background_gradient(subset=["14D 스코어"], cmap="Blues"),
-                    use_container_width=True,
-                    hide_index=True
-                )
+                if f_holdings_data:
+                    st.dataframe(pd.DataFrame(f_holdings_data), use_container_width=True, hide_index=True)
             else:
                 st.info(f"@{target_f_uname} 님이 등록한 보유 종목이 없습니다.")
     else:
         st.info("아직 등록된 친구가 없습니다. 친구의 닉네임을 검색하여 추가해보세요!")
 
-# -------------------- 3. 7일 내 긴급 상향 --------------------
+# -------------------- 3. 🔥 7일 내 긴급 상향 (Supabase 520+ 전 종목 기반) --------------------
 elif menu == "🔥 7일 내 긴급 상향":
-    st.header("🔥 7일 이내 신규 평가 발표 종목")
-    with st.spinner("최근 14일 월가 리포트 분석 중..."):
-        valid_results = get_all_watchlist_results()
-        urgent_stocks = [r for r in valid_results if r["has_7d"]]
+    st.header("🔥 최근 7일 이내 신규 평가 발표 종목")
+    
+    db_data = get_all_db_stock_analysis()
+    urgent_stocks = [format_db_row_to_display(r) for r in db_data if r.get("has_7d")]
 
     if urgent_stocks:
+        st.caption(f"📊 S&P 500 & 나스닥 100 중 최근 7일간 월가 리포트가 발표된 종목: **총 {len(urgent_stocks)}개**")
         urgent_stocks = sorted(urgent_stocks, key=lambda x: x["raw_score"], reverse=True)
         for s in urgent_stocks:
             with st.container():
@@ -854,26 +901,31 @@ elif menu == "🔥 7일 내 긴급 상향":
     else:
         st.info("현재 모니터링 풀 내에 최근 7일간 신규 평가가 발표된 종목이 없습니다.")
 
-# -------------------- 4. 14일 모멘텀 랭킹 --------------------
+# -------------------- 4. 🏆 14일 모멘텀 랭킹 (Supabase 520+ 전 종목 기반) --------------------
 elif menu == "🏆 14일 모멘텀 랭킹":
-    st.header("🏆 최근 14일 기관 평가 종합 순위")
-    with st.spinner("순위 집계 중..."):
-        valid_results = get_all_watchlist_results()
-    if valid_results:
-        df = pd.DataFrame(valid_results)
+    st.header("🏆 최근 14일 기관 평가 종합 순위 (S&P 500 & 나스닥 100)")
+    
+    db_data = get_all_db_stock_analysis()
+    if db_data:
+        formatted = [format_db_row_to_display(r) for r in db_data]
+        df = pd.DataFrame(formatted)
         df_sorted = df.sort_values(by="raw_score", ascending=False).drop(
-            columns=["최근7일내역", "8~14일내역", "downgrades_7d", "hist", "raw_score", "raw_price", "has_7d", "has_14d"]
+            columns=["최근7일내역", "8~14일내역", "downgrades_7d", "raw_score", "raw_price", "has_7d", "has_14d"]
         )
-        st.dataframe(df_sorted.style.background_gradient(subset=["모멘텀 스코어"], cmap="Blues"), use_container_width=True,
-                     hide_index=True)
+        st.caption(f"🚀 총 **{len(df_sorted)}개** 미국 핵심 기업 순위 집계 완료")
+        st.dataframe(df_sorted, use_container_width=True, hide_index=True)
+    else:
+        st.info("아직 DB에 저장된 종목 데이터가 없습니다. daily_updater.py를 실행해주세요.")
 
-# -------------------- 5. 미국 전 종목 직접 검색 & 차트 --------------------
+# -------------------- 5. 🔍 미국 전 종목 직접 검색 & 차트 --------------------
 elif menu == "🔍 미국 전 종목 직접 검색 & 차트":
     st.header("🔍 미국 전 종목 직접 검색 & 차트")
     search_ticker = st.text_input("분석할 미국 주식 티커 입력 (예: PLTR, CRWD, TSLA, HOOD 등)", value="PLTR").strip().upper()
+    
     if search_ticker:
-        with st.spinner(f"{search_ticker} 데이터 수집 중..."):
-            res = analyze_stock_full(search_ticker)
+        with st.spinner(f"{search_ticker} 실시간 분석 및 DB 업데이트 중..."):
+            res = analyze_and_upsert_stock_live(search_ticker)
+        
         if res:
             c1, c2, c3 = st.columns(3)
             c1.metric("14D 모멘텀 스코어", f"{res['모멘텀 스코어']}점")
