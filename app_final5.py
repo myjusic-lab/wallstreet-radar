@@ -440,7 +440,8 @@ def analyze_stock_full(ticker: str):
             "has_7d": len(recent_7d_events) > 0,
             "has_14d": total_14d_reports > 0
         }
-    except Exception:
+    except Exception as e:
+        st.error(f"[{ticker}] 데이터 수집 오류: {e}")
         return None
 
 
