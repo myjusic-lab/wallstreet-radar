@@ -468,6 +468,7 @@ def analyze_stock_full(ticker: str):
             "has_14d": total_14d_reports > 0
         }
     except Exception as e:
+        st.error(f"[{ticker}] 데이터 수집 오류: {e}")
         return None
 
 
