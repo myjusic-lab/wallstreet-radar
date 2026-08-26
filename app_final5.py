@@ -509,9 +509,11 @@ if not st.session_state["user_email"]:
             if not st.session_state["google_auth_email"]:
                 st.info("💡 안전한 본인 식별을 위해 Google 계정 인증 후 아이디와 비밀번호를 생성합니다.")
                 try:
+                    REDIRECT_URL = "https://wallstreet-radar.streamlit.app"
+
                     auth_res = supabase.auth.sign_in_with_oauth({
                         "provider": "google",
-                        "options": {"redirect_to": "http://localhost:8501"}
+                        "options": {"redirect_to": REDIRECT_URL}
                     })
                     google_login_url = auth_res.url
                 except Exception:
