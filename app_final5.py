@@ -15,7 +15,8 @@ st.set_page_config(
     initial_sidebar_state="auto"
 )
 
-# ==================== 1. API 및 서비스 키 설정 ====================
+# ==================== 1. API 및 서비스 키 설정 (Secrets에서 안전하게 로드) ====================
+# 기본값 (st.secrets가 있으면 우선 적용)
 SUPABASE_URL = "https://ookuwqyveokduoqwmksd.supabase.co"
 SUPABASE_KEY = ""
 ONESIGNAL_APP_ID = ""
@@ -27,14 +28,11 @@ if "SUPABASE_KEY" in st.secrets:
 if "ONESIGNAL_APP_ID" in st.secrets:
     ONESIGNAL_APP_ID = st.secrets["ONESIGNAL_APP_ID"]
 
-
 @st.cache_resource
 def init_supabase() -> Client:
     return create_client(SUPABASE_URL, SUPABASE_KEY)
 
-
 supabase = init_supabase()
-
 
 def hash_pw(password: str) -> str:
     return hashlib.sha256(password.encode('utf-8')).hexdigest()
@@ -43,8 +41,6 @@ def hash_pw(password: str) -> str:
 # ==================== 2. OAuth 세션 & OneSignal 웹 푸시 스크립트 ====================
 def inject_onesignal_script(user_email: str):
     """OneSignal 알림 권한 팝업 및 사용자 이메일 태그 등록"""
-    if not ONESIGNAL_APP_ID:
-        return
     components.html(
         f"""
         <script src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js" defer></script>
@@ -57,7 +53,9 @@ def inject_onesignal_script(user_email: str):
                 enable: false,
               }},
             }});
+            // 알림 권한 요청 팝업
             await OneSignal.Notifications.requestPermission();
+            // 해당 기기와 유저 이메일 매핑
             if ("{user_email}") {{
               OneSignal.User.addTag("user_email", "{user_email}");
             }}
@@ -334,8 +332,7 @@ def analyze_stock_full(ticker: str):
                         except (ValueError, TypeError):
                             pass
 
-                if not firm or firm in seen_firms:
-                    continue
+                if not firm or firm in seen_firms: continue
                 seen_firms.add(firm)
 
                 firm_upper = firm.upper()
@@ -382,12 +379,10 @@ def analyze_stock_full(ticker: str):
                             top_tier_buyers_14d.append(firm)
                 elif category == "HOLD":
                     all_14d_hold += 1
-                    if is_top_tier:
-                        top_14d_hold += 1
+                    if is_top_tier: top_14d_hold += 1
                 elif category == "SELL":
                     all_14d_sell += 1
-                    if is_top_tier:
-                        top_14d_sell += 1
+                    if is_top_tier: top_14d_sell += 1
 
         current_price = info.get('currentPrice', info.get('regularMarketPrice', 0))
         target_mean = info.get('targetMeanPrice', 0)
@@ -415,10 +410,8 @@ def analyze_stock_full(ticker: str):
         final_score = int(max(0, score))
 
         top_buyers_all = []
-        if top_tier_buyers_7d:
-            top_buyers_all.append(f"🔥7일: {', '.join(top_tier_buyers_7d)}")
-        if top_tier_buyers_14d:
-            top_buyers_all.append(f"8~14일: {', '.join(top_tier_buyers_14d)}")
+        if top_tier_buyers_7d: top_buyers_all.append(f"🔥7일: {', '.join(top_tier_buyers_7d)}")
+        if top_tier_buyers_14d: top_buyers_all.append(f"8~14일: {', '.join(top_tier_buyers_14d)}")
         buyers_display = " | ".join(top_buyers_all) if top_buyers_all else "-"
 
         return {
@@ -480,6 +473,7 @@ if not st.session_state["user_email"]:
     col1, col2, col3 = st.columns([1, 2.2, 1])
 
     with col2:
+        # 정상적인 타이틀 배너
         st.markdown(
             """
             <div style="background-color: #1E222D; padding: 25px 30px; border-radius: 16px; text-align: center; border: 1px solid #363C4E; box-shadow: 0 4px 20px rgba(0,0,0,0.3); margin-bottom: 20px;">
@@ -516,6 +510,7 @@ if not st.session_state["user_email"]:
             if not st.session_state["google_auth_email"]:
                 st.info("💡 안전한 본인 식별을 위해 Google 계정 인증 후 아이디와 비밀번호를 생성합니다.")
 
+                # 여기서 google_login_url 생성
                 google_login_url = "#"
                 try:
                     REDIRECT_URL = "https://wallstreet-radar.streamlit.app"
@@ -530,6 +525,7 @@ if not st.session_state["user_email"]:
                 except Exception as e:
                     st.error(f"OAuth URL 생성 실패: {e}")
 
+                # target="_top"으로 403 Iframe 차단 탈출
                 st.markdown(
                     f"""
                     <a href="{google_login_url}" target="_top" style="text-decoration: none;">
@@ -580,6 +576,7 @@ if not st.session_state["user_email"]:
 user_email = st.session_state["user_email"]
 profile = get_user_profile_by_email(user_email)
 
+# 로그인 완료 시 OneSignal 알림 허용 팝업 실행
 inject_onesignal_script(user_email)
 
 my_username = profile["username"] if profile else "User"
@@ -819,8 +816,7 @@ elif menu == "🔥 7일 내 긴급 상향":
                 c2.write(f"• **탑티어 매수사:** {s['탑티어 매수사']}")
 
                 details = [f"- 🔥 {e}" for e in s["최근7일내역"]]
-                if s["8~14일내역"]:
-                    details.extend([f"- ⏱️ {e}" for e in s["8~14일내역"]])
+                if s["8~14일내역"]: details.extend([f"- ⏱️ {e}" for e in s["8~14일내역"]])
                 c3.info("**14일 내 리포트 이력:**\n\n" + "\n".join(details))
                 st.markdown("---")
     else:
@@ -858,12 +854,9 @@ elif menu == "🔍 미국 전 종목 직접 검색 & 차트":
             m3.metric("14일 이내 목표가 평균", res["14D 목표가 평균"])
             m4.metric("14일 이내 최고 / 최저", res["14D 최고/최저"])
             st.write(f"• **탑티어 매수 추천 증권사:** {res['탑티어 매수사']}")
-            if res["최근7일내역"]:
-                st.success("🔥 **최근 7일 이내 긴급 리포트:**\n" + "\n".join([f"- {e}" for e in res["최근7일내역"]]))
-            if res["8~14일내역"]:
-                st.info("⏱️ **8~14일 전 리포트:**\n" + "\n".join([f"- {e}" for e in res["8~14일내역"]]))
-            if not res["has_14d"]:
-                st.warning("⚠️ 최근 14일 이내에 발표된 신규 월가 리포트가 없습니다.")
+            if res["최근7일내역"]: st.success("🔥 **최근 7일 이내 긴급 리포트:**\n" + "\n".join([f"- {e}" for e in res["최근7일내역"]]))
+            if res["8~14일내역"]: st.info("⏱️ **8~14일 전 리포트:**\n" + "\n".join([f"- {e}" for e in res["8~14일내역"]]))
+            if not res["has_14d"]: st.warning("⚠️ 최근 14일 이내에 발표된 신규 월가 리포트가 없습니다.")
             render_stock_chart(search_ticker, res["hist"])
         else:
             st.error("종목 정보를 불러올 수 없습니다. 올바른 티커인지 확인해주세요.")
