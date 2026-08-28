@@ -17,6 +17,21 @@ if not SUPABASE_KEY:
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ==================== 2. 월가 기관 등급 정의 ====================
+# 11대 GICS 글로벌 표준 섹터 한글 매핑 (100% 자동 분류)
+GICS_SECTOR_KR = {
+    "Technology": "빅테크 & IT",
+    "Financial Services": "금융 & 핀테크",
+    "Healthcare": "바이오 & 헬스케어",
+    "Consumer Cyclical": "소비재 & 경기민감",
+    "Communication Services": "통신 & 미디어",
+    "Industrials": "산업재 & 모빌리티",
+    "Consumer Defensive": "필수소비재 & 유통",
+    "Energy": "에너지 & 원자재",
+    "Basic Materials": "에너지 & 원자재",
+    "Real Estate": "부동산 & 리츠",
+    "Utilities": "유틸리티 & 전력"
+}
+
 TIER_1_FIRMS = [
     "GOLDMAN SACHS", "GOLDMAN", "MORGAN STANLEY", "JP MORGAN", "JPMORGAN",
     "BANK OF AMERICA", "BOFA", "B OF A", "CITIGROUP", "CITI", "BARCLAYS",
@@ -109,7 +124,8 @@ def analyze_and_upsert_stock(ticker: str, session: requests.Session) -> bool:
 
         current_price = 0.0
         target_mean, target_median, target_high, target_low = 0.0, 0.0, 0.0, 0.0
-        
+        sector_kr = "기타"  # 👈 1. 기본값 설정
+
         try:
             info = stock.info
             current_price = float(info.get('currentPrice', info.get('regularMarketPrice', 0.0)))
@@ -117,6 +133,9 @@ def analyze_and_upsert_stock(ticker: str, session: requests.Session) -> bool:
             target_median = float(info.get('targetMedianPrice', target_mean) or 0.0)
             target_high = float(info.get('targetHighPrice', 0.0) or 0.0)
             target_low = float(info.get('targetLowPrice', 0.0) or 0.0)
+
+            en_sec = info.get('sector', '')                # 👈 2. 영문 섹터 가져오기
+            sector_kr = GICS_SECTOR_KR.get(en_sec, "기타")  # 👈 3. 한글 섹터로 변환
         except Exception:
             pass
 
@@ -233,6 +252,7 @@ def analyze_and_upsert_stock(ticker: str, session: requests.Session) -> bool:
         # Supabase stock_analysis 테이블에 Upsert
         row_data = {
             "ticker": ticker,
+            "sector": sector_kr,
             "score": final_score,
             "current_price": current_price,
             "target_median": target_median,
