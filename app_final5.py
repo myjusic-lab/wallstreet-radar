@@ -737,6 +737,11 @@ is_public = profile.get("is_portfolio_public", True) if profile else True
 
 # 사이드바
 with st.sidebar:
+    st.markdown("---")
+    if st.button("🔄 최신 데이터 새로고침", use_container_width=True):
+        st.cache_data.clear() # 모든 캐시 초기화
+        st.rerun()            # 화면 다시 로드
+    
     st.markdown("### ⚡ Wall Street Radar")
     st.write(f"👤 아이디: **@{my_username}**")
     st.caption(f"이메일: {user_email}")
