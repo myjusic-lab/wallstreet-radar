@@ -805,7 +805,7 @@ with st.sidebar:
     st.markdown("### 📌 메뉴 선택")
     menu = st.radio(
         "이동할 화면을 선택하세요",
-        ["💼 내 투자 (포트폴리오)", "👥 친구 포트폴리오", "🔥 7일 내 긴급 상향", "🏆 14일 모멘텀 랭킹", "🔍 미국 전 종목 직접 검색 & 차트"],
+        ["💼 내 투자 (포트폴리오)", "👥 친구 포트폴리오", "🔥 7일 내 긴급 상향", "🔍 미국 전 종목 직접 검색 & 차트"],
         label_visibility="collapsed"
     )
 
@@ -1094,22 +1094,6 @@ elif menu == "🔥 7일 내 긴급 상향":
                     st.markdown("---")
     else:
         st.info("현재 모니터링 풀 내에 최근 7일간 신규 평가가 발표된 종목이 없습니다.")
-
-# -------------------- 4. 🏆 14일 모멘텀 랭킹 --------------------
-elif menu == "🏆 14일 모멘텀 랭킹":
-    st.header("🏆 최근 14일 기관 평가 종합 순위 (S&P 500 & 나스닥 100)")
-    
-    db_data = get_all_db_stock_analysis()
-    if db_data:
-        formatted = [format_db_row_to_display(r) for r in db_data]
-        df = pd.DataFrame(formatted)
-        df_sorted = df.sort_values(by="raw_score", ascending=False).drop(
-            columns=["최근7일내역", "8~14일내역", "downgrades_7d", "raw_score", "raw_price", "upside_val", "total_reports_count", "has_7d", "has_14d", "updated_at"]
-        )
-        st.caption(f"🚀 총 **{len(df_sorted)}개** 미국 핵심 기업 순위 집계 완료")
-        st.dataframe(df_sorted, use_container_width=True, hide_index=True)
-    else:
-        st.info("아직 DB에 저장된 종목 데이터가 없습니다. daily_updater.py를 실행해주세요.")
 
 # -------------------- 5. 🔍 미국 전 종목 직접 검색 & 차트 --------------------
 elif menu == "🔍 미국 전 종목 직접 검색 & 차트":
