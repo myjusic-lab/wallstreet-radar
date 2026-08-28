@@ -343,6 +343,42 @@ def delete_user_stock(user_email: str, ticker: str) -> bool:
 
 
 # ==================== 5. 퀀트 분석 엔진 & DB 연동 캐시 ====================
+# 11대 GICS 글로벌 표준 섹터 한글 매핑 (100% 자동 분류)
+GICS_SECTOR_KR = {
+    "Technology": "빅테크 & IT",
+    "Financial Services": "금융 & 핀테크",
+    "Healthcare": "바이오 & 헬스케어",
+    "Consumer Cyclical": "소비재 & 경기민감",
+    "Communication Services": "통신 & 미디어",
+    "Industrials": "산업재 & 모빌리티",
+    "Consumer Defensive": "필수소비재 & 유통",
+    "Energy": "에너지 & 원자재",
+    "Basic Materials": "에너지 & 원자재",
+    "Real Estate": "부동산 & 리츠",
+    "Utilities": "유틸리티 & 전력"
+}
+
+# 주요 종목 한글 검색용 티커 매핑 사전
+KOREAN_TICKER_MAP = {
+    "애플": "AAPL", "마이크로소프트": "MSFT", "마소": "MSFT", "엔비디아": "NVDA", "엔비": "NVDA",
+    "구글": "GOOGL", "알파벳": "GOOGL", "아마존": "AMZN", "메타": "META", "페이스북": "META",
+    "테슬라": "TSLA", "브로드컴": "AVGO", "오라클": "ORCL", "어도비": "ADBE", "세일즈포스": "CRM",
+    "시스코": "CSCO", "넷플릭스": "NFLX", "팔란티어": "PLTR", "아이온큐": "IONQ", "스노우플레이크": "SNOW",
+    "클라우드플레어": "NET", "서비스나우": "NOW", "우버": "UBER", "에어비앤비": "ABNB", "레딧": "RDDT",
+    "AMD": "AMD", "에이엠디": "AMD", "퀄컴": "QCOM", "인텔": "INTC", "텍사스인스트루먼트": "TXN",
+    "마이크론": "MU", "어플라이드머티어리얼즈": "AMAT", "어플라이드": "AMAT", "램리서치": "LRCX",
+    "ASML": "ASML", "TSMC": "TSM", "암": "ARM", "아날로그디바이스": "ADI", "슈퍼마이크로컴퓨터": "SMCI",
+    "슈마컴": "SMCI", "마벨": "MRVL", "온세미": "ON", "일라이릴리": "LLY", "노보노디스크": "NVO",
+    "존슨앤존슨": "JNJ", "유나이티드헬스": "UNH", "머크": "MRK", "애브비": "ABBV", "화이자": "PFE",
+    "암젠": "AMGN", "모더나": "MRNA", "인튜이티브서지컬": "ISRG", "템퍼스": "TEM", "비자": "V",
+    "마스터카드": "MA", "JP모건": "JPM", "제이피모간": "JPM", "뱅크오브아메리카": "BAC",
+    "골드만삭스": "GS", "모건스탠리": "MS", "블랙록": "BLK", "페이팔": "PYPL", "코인베이스": "COIN",
+    "로빈후드": "HOOD", "소파이": "SOFI", "월마트": "WMT", "코스트코": "COST", "홈디포": "HD",
+    "코카콜라": "KO", "펩시": "PEP", "맥도날드": "MCD", "나이키": "NKE", "스타벅스": "SBUX",
+    "셀시어스": "CELH", "록히드마틴": "LMT", "보잉": "BA", "로켓랩": "RKLB", "AST스페이스모바일": "ASTS",
+    "엑손모빌": "XOM", "셰브론": "CVX", "디즈니": "DIS", "크라우드스트라이크": "CRWD", "팔로알토": "PANW"
+}
+
 TIER_1_FIRMS = [
     "GOLDMAN SACHS", "GOLDMAN", "MORGAN STANLEY", "JP MORGAN", "JPMORGAN",
     "BANK OF AMERICA", "BOFA", "B OF A", "CITIGROUP", "CITI", "BARCLAYS",
@@ -571,6 +607,7 @@ def get_all_db_stock_analysis():
 
 
 def format_db_row_to_display(r: dict) -> dict:
+    t = r["ticker"]
     c_p = float(r.get('current_price', 0))
     t_m = float(r.get('target_median', 0)) if r.get('target_median') else 0.0
     u_m = float(r.get('upside_median', 0)) if r.get('upside_median') else 0.0
@@ -580,7 +617,8 @@ def format_db_row_to_display(r: dict) -> dict:
     total_cnt = len(recent_7d) + len(recent_14d)
     
     return {
-        "티커": r["ticker"],
+        "티커": t,
+        "섹터": r.get("sector", "기타") or "기타", # 👈 DB의 공식 11대 섹터 사용
         "모멘텀 스코어": r["score"],
         "현재가": f"${c_p:.2f}",
         "탑티어 14D (B/H/S)": r.get("top_14d_bhs", "-"),
@@ -600,7 +638,6 @@ def format_db_row_to_display(r: dict) -> dict:
         "has_14d": r.get("has_14d", False),
         "updated_at": r.get("updated_at", "")
     }
-
 
 def render_stock_chart(ticker: str, hist: pd.DataFrame):
     if hist.empty or len(hist) < 20:
@@ -987,7 +1024,7 @@ elif menu == "👥 친구 포트폴리오":
     else:
         st.info("아직 맺어진 친구가 없습니다. 친구의 닉네임을 검색하여 요청을 보내보세요!")
 
-# -------------------- 3. 🔥 7일 내 긴급 상향 (토글 접기 + 다중 정렬 & 섹터 필터) --------------------
+# -------------------- 3. 🔥 7일 내 긴급 상향 --------------------
 elif menu == "🔥 7일 내 긴급 상향":
     st.header("🔥 최근 7일 이내 신규 평가 발표 종목")
     
@@ -995,7 +1032,6 @@ elif menu == "🔥 7일 내 긴급 상향":
     urgent_stocks = [format_db_row_to_display(r) for r in db_data if r.get("has_7d")]
 
     if urgent_stocks:
-        # 필터 및 정렬 컨트롤러 바
         c_sort, c_sec, c_cnt = st.columns([2, 2, 1.5])
         
         sort_mode = c_sort.selectbox(
@@ -1003,12 +1039,21 @@ elif menu == "🔥 7일 내 긴급 상향":
             options=["🏆 모멘텀 점수 높은 순", "⚡ 최근 리포트 순", "📈 목표가 상승여력 순", "📊 14일 총 리포트 수 많은 순"]
         )
         
+        # 11대 GICS 표준 섹터 옵션
         sector_filter = c_sec.selectbox(
             "🏢 섹터 필터",
-            options=["전체 섹터", "빅테크 & IT", "반도체 & 하드웨어", "바이오 & 헬스케어", "금융 & 핀테크", "소비재 & 커머스", "기타"]
+            options=[
+                "전체 섹터", "빅테크 & IT", "금융 & 핀테크", "바이오 & 헬스케어",
+                "소비재 & 경기민감", "통신 & 미디어", "산업재 & 모빌리티",
+                "필수소비재 & 유통", "에너지 & 원자재", "부동산 & 리츠", "유틸리티 & 전력", "기타"
+            ]
         )
         
-        # 정렬 로직 적용
+        # 1. 실제 섹터 필터링 수행
+        if sector_filter != "전체 섹터":
+            urgent_stocks = [s for s in urgent_stocks if s.get("섹터") == sector_filter]
+        
+        # 2. 정렬 로직 적용
         if sort_mode == "🏆 모멘텀 점수 높은 순":
             urgent_stocks = sorted(urgent_stocks, key=lambda x: x["raw_score"], reverse=True)
         elif sort_mode == "📈 목표가 상승여력 순":
@@ -1021,31 +1066,32 @@ elif menu == "🔥 7일 내 긴급 상향":
         c_cnt.caption(f"\n\n📊 대상: **총 {len(urgent_stocks)}개**")
         st.markdown("---")
 
-        for s in urgent_stocks:
-            with st.container():
-                c1, c2, c3 = st.columns([1.2, 2.3, 2.5])
-                
-                # 1열: 점수 및 상승여력
-                c1.metric(f"**{s['티커']}**", f"{s['모멘텀 스코어']}점", s["총 중앙값 (상승여력)"])
-                
-                # 2열: 핵심 요약 지표
-                c2.write(f"• **현재가:** `{s['현재가']}`")
-                c2.write(f"• **탑티어 14D (B/H/S):** `{s['탑티어 14D (B/H/S)']}`")
-                c2.write(f"• **전체 14D (B/H/S):** `{s['전체 14D (B/H/S)']}`")
-                c2.write(f"• **14D 목표가 평균:** {s['14D 목표가 평균']} (범위: {s['14D 최고/최저']})")
-                c2.write(f"• **탑티어 매수사:** {s['탑티어 매수사']}")
-
-                # 3열: 14일 리포트 목록을 Expander 토글로 깔끔하게 접기
-                with c3:
-                    details = [f"- 🔥 {e}" for e in s["최근7일내역"]]
-                    if s["8~14일내역"]:
-                        details.extend([f"- ⏱️ {e}" for e in s["8~14일내역"]])
+        if not urgent_stocks:
+            st.info(f"선택하신 **'{sector_filter}'** 섹터에는 최근 7일 이내 발표된 리포트가 없습니다.")
+        else:
+            for s in urgent_stocks:
+                with st.container():
+                    c1, c2, c3 = st.columns([1.2, 2.3, 2.5])
                     
-                    st.caption(f"최근 7일 발표 **{len(s['최근7일내역'])}건** / 14일 총 **{s['total_reports_count']}건**")
-                    with st.expander("📑 14일 내 리포트 상세 이력 보기 (클릭)", expanded=False):
-                        st.markdown("\n".join(details))
-                
-                st.markdown("---")
+                    c1.metric(f"**{s['티커']}**", f"{s['모멘텀 스코어']}점", s["총 중앙값 (상승여력)"])
+                    c1.caption(f"섹터: `{s.get('섹터', '기타')}`")
+                    
+                    c2.write(f"• **현재가:** `{s['현재가']}`")
+                    c2.write(f"• **탑티어 14D (B/H/S):** `{s['탑티어 14D (B/H/S)']}`")
+                    c2.write(f"• **전체 14D (B/H/S):** `{s['전체 14D (B/H/S)']}`")
+                    c2.write(f"• **14D 목표가 평균:** {s['14D 목표가 평균']} (범위: {s['14D 최고/최저']})")
+                    c2.write(f"• **탑티어 매수사:** {s['탑티어 매수사']}")
+
+                    with c3:
+                        details = [f"- 🔥 {e}" for e in s["최근7일내역"]]
+                        if s["8~14일내역"]:
+                            details.extend([f"- ⏱️ {e}" for e in s["8~14일내역"]])
+                        
+                        st.caption(f"최근 7일 발표 **{len(s['최근7일내역'])}건** / 14일 총 **{s['total_reports_count']}건**")
+                        with st.expander("📑 14일 내 리포트 상세 이력 보기 (클릭)", expanded=False):
+                            st.markdown("\n".join(details))
+                    
+                    st.markdown("---")
     else:
         st.info("현재 모니터링 풀 내에 최근 7일간 신규 평가가 발표된 종목이 없습니다.")
 
@@ -1068,7 +1114,17 @@ elif menu == "🏆 14일 모멘텀 랭킹":
 # -------------------- 5. 🔍 미국 전 종목 직접 검색 & 차트 --------------------
 elif menu == "🔍 미국 전 종목 직접 검색 & 차트":
     st.header("🔍 미국 전 종목 직접 검색 & 차트")
-    search_ticker = st.text_input("분석할 미국 주식 티커 입력 (예: PLTR, CRWD, TSLA, HOOD 등)", value="PLTR").strip().upper()
+    
+    search_input = st.text_input(
+        "분석할 미국 주식 티커 또는 한글 기업명 입력 (예: 엔비디아, 월마트, PLTR, 테슬라, 애플 등)",
+        value="PLTR"
+    ).strip()
+    
+    # 한글 입력 시 티커 자동 변환, 영문 입력 시 대문자 변환
+    search_ticker = KOREAN_TICKER_MAP.get(search_input, search_input).upper()
+    
+    if search_input in KOREAN_TICKER_MAP:
+        st.caption(f"💡 한글 기업명 감지: **'{search_input}'** ➡️ 티커 **`[{search_ticker}]`** 자동 변환")
     
     if search_ticker:
         res = None
