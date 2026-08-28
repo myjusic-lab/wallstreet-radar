@@ -145,18 +145,19 @@ if code and not st.session_state["user_email"] and not st.session_state["google_
         st.error(f"인증 코드 교환 실패: {e}")
 
 
-# ==================== 3. 프로필 & 소셜 DB CRUD ====================
+# ==================== 3. 프로필 & 친구 관리 DB CRUD ====================
 def get_user_profile_by_email(email: str):
-    try:
-        res = supabase.table("profiles").select("*").eq("user_email", email).execute()
-        if res.data:
-            return res.data[0]
-    except Exception:
-        pass
+    for _ in range(2):
+        try:
+            res = supabase.table("profiles").select("*").eq("user_email", email).execute()
+            if res and res.data:
+                return res.data[0]
+        except Exception:
+            pass
     return None
 
+
 def get_user_profile_by_username(username: str):
-    """Supabase 통신 지연 시 최대 2회 재시도"""
     for _ in range(2):
         try:
             res = supabase.table("profiles").select("*").eq("username", username).execute()
@@ -165,6 +166,7 @@ def get_user_profile_by_username(username: str):
         except Exception:
             pass
     return None
+
 
 def check_username_exists(username: str) -> bool:
     try:
@@ -204,35 +206,100 @@ def update_privacy_setting(email: str, is_public: bool):
         pass
 
 
-def add_friend_relation(my_email: str, friend_email: str) -> bool:
+# ----- 친구 요청 및 수락/거절 시스템 -----
+def send_friend_request(my_email: str, target_email: str) -> str:
+    """친구 요청 보내기 (중복 검사 및 상태 처리)"""
     try:
+        # 이미 존재하는 관계 확인
+        res = supabase.table("friendships").select("*").or_(
+            f"and(user_email.eq.{my_email},friend_email.eq.{target_email}),and(user_email.eq.{target_email},friend_email.eq.{my_email})"
+        ).execute()
+        
+        if res.data:
+            existing = res.data[0]
+            if existing.get("status") == "accepted":
+                return "ALREADY_FRIEND"
+            elif existing.get("status") == "pending":
+                if existing.get("user_email") == my_email:
+                    return "ALREADY_SENT"
+                else:
+                    return "NEED_ACCEPT" # 상대방이 이미 나에게 요청을 보낸 상태
+
         supabase.table("friendships").insert({
             "user_email": my_email,
-            "friend_email": friend_email,
-            "status": "accepted"
+            "friend_email": target_email,
+            "status": "pending"
         }).execute()
-        return True
+        return "SUCCESS"
     except Exception as e:
-        st.error(f"친구 추가 실패: {e}")
+        return f"ERROR: {e}"
+
+
+def get_pending_friend_requests(my_email: str):
+    """나에게 온 친구 요청 목록 조회"""
+    try:
+        res = supabase.table("friendships").select("id, user_email, created_at").eq("friend_email", my_email).eq("status", "pending").execute()
+        if not res.data:
+            return []
+        sender_emails = [r["user_email"] for r in res.data]
+        prof_res = supabase.table("profiles").select("user_email, username").in_("user_email", sender_emails).execute()
+        prof_dict = {p["user_email"]: p["username"] for p in prof_res.data} if prof_res.data else {}
+        
+        requests_list = []
+        for r in res.data:
+            sender = r["user_email"]
+            requests_list.append({
+                "req_id": r.get("id"),
+                "sender_email": sender,
+                "sender_username": prof_dict.get(sender, sender.split("@")[0])
+            })
+        return requests_list
+    except Exception:
+        return []
+
+
+def respond_friend_request(my_email: str, sender_email: str, accept: bool) -> bool:
+    """친구 요청 수락 또는 거절"""
+    try:
+        if accept:
+            supabase.table("friendships").update({"status": "accepted"}).eq("user_email", sender_email).eq("friend_email", my_email).execute()
+        else:
+            supabase.table("friendships").delete().eq("user_email", sender_email).eq("friend_email", my_email).execute()
+        return True
+    except Exception:
         return False
 
 
-def get_my_friends(my_email: str):
+def get_my_accepted_friends(my_email: str):
+    """수락 완료된 상호 친구 목록 조회"""
     try:
-        res = supabase.table("friendships").select("friend_email").eq("user_email", my_email).execute()
-        friend_emails = [r["friend_email"] for r in res.data]
+        res = supabase.table("friendships").select("user_email, friend_email").eq("status", "accepted").or_(
+            f"user_email.eq.{my_email},friend_email.eq.{my_email}"
+        ).execute()
+        if not res.data:
+            return []
+        friend_emails = set()
+        for r in res.data:
+            if r["user_email"] == my_email:
+                friend_emails.add(r["friend_email"])
+            else:
+                friend_emails.add(r["user_email"])
+        
         if not friend_emails:
             return []
-        prof_res = supabase.table("profiles").select("user_email, username, is_portfolio_public").in_("user_email",
-                                                                                                      friend_emails).execute()
-        return prof_res.data
+            
+        prof_res = supabase.table("profiles").select("user_email, username, is_portfolio_public").in_("user_email", list(friend_emails)).execute()
+        return prof_res.data if prof_res.data else []
     except Exception:
         return []
 
 
 def delete_friend_relation(my_email: str, friend_email: str) -> bool:
+    """친구 관계 삭제"""
     try:
-        supabase.table("friendships").delete().eq("user_email", my_email).eq("friend_email", friend_email).execute()
+        supabase.table("friendships").delete().or_(
+            f"and(user_email.eq.{my_email},friend_email.eq.{friend_email}),and(user_email.eq.{friend_email},friend_email.eq.{my_email})"
+        ).execute()
         return True
     except Exception:
         return False
@@ -319,6 +386,8 @@ def analyze_and_upsert_stock_live(ticker: str):
 
         current_price = 0.0
         target_mean, target_median, target_high, target_low = 0.0, 0.0, 0.0, 0.0
+        sector = "미분류"
+        
         try:
             info = stock.info
             current_price = float(info.get('currentPrice', info.get('regularMarketPrice', 0.0)))
@@ -326,6 +395,7 @@ def analyze_and_upsert_stock_live(ticker: str):
             target_median = float(info.get('targetMedianPrice', target_mean) or 0.0)
             target_high = float(info.get('targetHighPrice', 0.0) or 0.0)
             target_low = float(info.get('targetLowPrice', 0.0) or 0.0)
+            sector = info.get('sector', '미분류')
         except Exception:
             pass
 
@@ -438,7 +508,7 @@ def analyze_and_upsert_stock_live(ticker: str):
         if top_tier_buyers_14d: top_buyers_all.append(f"8~14일: {', '.join(top_tier_buyers_14d)}")
         buyers_display = " | ".join(top_buyers_all) if top_buyers_all else "-"
 
-        # DB 저장
+        # Supabase stock_analysis DB에 저장
         row_data = {
             "ticker": ticker,
             "score": final_score,
@@ -479,6 +549,8 @@ def analyze_and_upsert_stock_live(ticker: str):
             "downgrades_7d": recent_downgrades_7d,
             "hist": hist,
             "raw_score": final_score,
+            "upside_val": upside_median,
+            "total_reports_count": total_14d_reports,
             "has_7d": len(recent_7d_events) > 0,
             "has_14d": total_14d_reports > 0
         }
@@ -488,7 +560,7 @@ def analyze_and_upsert_stock_live(ticker: str):
 
 @st.cache_data(ttl=60)
 def get_all_db_stock_analysis():
-    """Supabase stock_analysis 테이블에서 520+ 전 종목 분석 결과 초고속 로드"""
+    """Supabase stock_analysis 테이블에서 520+ 전 종목 분석 결과 로드"""
     try:
         res = supabase.table("stock_analysis").select("*").order("score", desc=True).execute()
         if res.data:
@@ -499,23 +571,34 @@ def get_all_db_stock_analysis():
 
 
 def format_db_row_to_display(r: dict) -> dict:
+    c_p = float(r.get('current_price', 0))
+    t_m = float(r.get('target_median', 0)) if r.get('target_median') else 0.0
+    u_m = float(r.get('upside_median', 0)) if r.get('upside_median') else 0.0
+    
+    recent_7d = r.get("recent_7d_events", []) or []
+    recent_14d = r.get("recent_14d_events", []) or []
+    total_cnt = len(recent_7d) + len(recent_14d)
+    
     return {
         "티커": r["ticker"],
         "모멘텀 스코어": r["score"],
-        "현재가": f"${float(r.get('current_price', 0)):.2f}",
+        "현재가": f"${c_p:.2f}",
         "탑티어 14D (B/H/S)": r.get("top_14d_bhs", "-"),
         "전체 14D (B/H/S)": r.get("all_14d_bhs", "-"),
-        "총 중앙값 (상승여력)": f"${float(r.get('target_median', 0)):.2f} (+{r.get('upside_median', 0)}%)" if r.get('target_median') else "-",
+        "총 중앙값 (상승여력)": f"${t_m:.2f} (+{u_m}%)" if t_m > 0 else "-",
         "14D 목표가 평균": f"${float(r.get('avg_14d', 0)):.2f}" if r.get('avg_14d') else "-",
         "14D 최고/최저": f"${float(r.get('high_14d', 0)):.2f} / ${float(r.get('low_14d', 0)):.2f}" if r.get('high_14d') else "-",
         "탑티어 매수사": r.get("top_buyers", "-"),
-        "최근7일내역": r.get("recent_7d_events", []) or [],
-        "8~14일내역": r.get("recent_14d_events", []) or [],
+        "최근7일내역": recent_7d,
+        "8~14일내역": recent_14d,
         "downgrades_7d": r.get("downgrades_7d", []) or [],
         "raw_score": r["score"],
-        "raw_price": float(r.get('current_price', 0)),
+        "raw_price": c_p,
+        "upside_val": u_m,
+        "total_reports_count": total_cnt,
         "has_7d": r.get("has_7d", False),
-        "has_14d": r.get("has_14d", False)
+        "has_14d": r.get("has_14d", False),
+        "updated_at": r.get("updated_at", "")
     }
 
 
@@ -699,7 +782,6 @@ if menu == "💼 내 투자 (포트폴리오)":
         if col_in4.button("DB에 저장", use_container_width=True):
             if in_ticker and in_price > 0 and in_qty > 0:
                 if save_user_stock(user_email, in_ticker, in_price, in_qty):
-                    # 보유 종목 저장 시 실시간 분석도 함께 실행하여 DB 업데이트
                     analyze_and_upsert_stock_live(in_ticker)
                     st.success(f"{in_ticker} 저장 및 분석 완료!")
                     st.rerun()
@@ -719,7 +801,6 @@ if menu == "💼 내 투자 (포트폴리오)":
         total_invested = 0.0
         total_eval = 0.0
 
-        # DB 캐시에서 먼저 로드
         db_records = {r["ticker"]: format_db_row_to_display(r) for r in get_all_db_stock_analysis()}
 
         for _, row in port_df.iterrows():
@@ -781,27 +862,55 @@ if menu == "💼 내 투자 (포트폴리오)":
     else:
         st.info("현재 등록된 보유 종목이 없습니다. 위의 메뉴를 통해 입력해보세요.")
 
-# -------------------- 2. 👥 친구 포트폴리오 --------------------
+# -------------------- 2. 👥 친구 포트폴리오 (친구요청함 & 수락/거절 시스템) --------------------
 elif menu == "👥 친구 포트폴리오":
     st.header("👥 친구 포트폴리오 피드")
 
-    with st.expander("➕ 새 친구 추가하기"):
-        c_f1, c_f2 = st.columns([3, 1])
-        search_f_uname = c_f1.text_input("추가할 친구의 아이디(닉네임) 입력", key="f_uname_input").strip()
+    # 1. 받은 친구 요청함 (기본값: 접힘)
+    pending_reqs = get_pending_friend_requests(user_email)
+    with st.expander(f"📬 받은 친구 요청함 ({len(pending_reqs)}건)", expanded=False):
+        if pending_reqs:
+            for req in pending_reqs:
+                r_col1, r_col2, r_col3 = st.columns([3, 1, 1])
+                r_col1.write(f"✨ **@{req['sender_username']}** 님이 친구 요청을 보냈습니다.")
+                if r_col2.button("수락", key=f"acc_{req['sender_email']}", type="primary", use_container_width=True):
+                    if respond_friend_request(user_email, req["sender_email"], accept=True):
+                        st.success(f"@{req['sender_username']} 님과 친구가 되었습니다!")
+                        st.rerun()
+                if r_col3.button("거절", key=f"rej_{req['sender_email']}", use_container_width=True):
+                    if respond_friend_request(user_email, req["sender_email"], accept=False):
+                        st.info("친구 요청을 거절했습니다.")
+                        st.rerun()
+        else:
+            st.caption("새로 도착한 친구 요청이 없습니다.")
 
-        if c_f2.button("친구 추가", use_container_width=True):
+    # 2. 새 친구 요청 보내기 (기본값: 접힘)
+    with st.expander("➕ 새 친구 요청 보내기", expanded=False):
+        c_f1, c_f2 = st.columns([3, 1])
+        search_f_uname = c_f1.text_input("요청을 보낼 친구의 아이디(닉네임) 입력", key="f_uname_input").strip()
+
+        if c_f2.button("친구요청 보내기", use_container_width=True):
             if search_f_uname == my_username:
-                st.warning("자기 자신은 친구로 추가할 수 없습니다.")
+                st.warning("자기 자신에게는 친구 요청을 보낼 수 없습니다.")
             elif search_f_uname:
                 target_user = get_user_profile_by_username(search_f_uname)
                 if target_user:
-                    if add_friend_relation(user_email, target_user["user_email"]):
-                        st.success(f"@{search_f_uname} 님이 친구로 추가되었습니다!")
-                        st.rerun()
+                    res_status = send_friend_request(user_email, target_user["user_email"])
+                    if res_status == "SUCCESS":
+                        st.success(f"@{search_f_uname} 님에게 친구 요청을 보냈습니다!")
+                    elif res_status == "ALREADY_FRIEND":
+                        st.info(f"@{search_f_uname} 님과는 이미 친구 상태입니다.")
+                    elif res_status == "ALREADY_SENT":
+                        st.warning(f"@{search_f_uname} 님에게 이미 보낸 요청이 대기 중입니다.")
+                    elif res_status == "NEED_ACCEPT":
+                        st.info(f"@{search_f_uname} 님이 이미 회원님께 요청을 보냈습니다. 상단의 '받은 친구 요청함'에서 수락해주세요.")
+                    else:
+                        st.error(res_status)
                 else:
                     st.error(f"존재하지 않는 닉네임입니다: '{search_f_uname}'")
 
-    friends = get_my_friends(user_email)
+    # 3. 내 수락된 친구 목록 및 포트폴리오 뷰어
+    friends = get_my_accepted_friends(user_email)
     if friends:
         friend_dict = {f"@{f['username']} ({'공개' if f['is_portfolio_public'] else '비공개'})": f for f in friends}
         selected_f_label = st.selectbox("조회할 친구를 선택하세요", options=list(friend_dict.keys()))
@@ -812,9 +921,9 @@ elif menu == "👥 친구 포트폴리오":
         target_f_public = target_f["is_portfolio_public"]
 
         col_f_del1, col_f_del2 = st.columns([4, 1])
-        if col_f_del2.button("이 친구 삭제", use_container_width=True):
+        if col_f_del2.button("이 친구 끊기", use_container_width=True):
             delete_friend_relation(user_email, target_f_email)
-            st.warning(f"@{target_f_uname} 삭제 완료")
+            st.warning(f"@{target_f_uname} 님과의 친구 관계를 해제했습니다.")
             st.rerun()
 
         st.markdown("---")
@@ -871,9 +980,9 @@ elif menu == "👥 친구 포트폴리오":
             else:
                 st.info(f"@{target_f_uname} 님이 등록한 보유 종목이 없습니다.")
     else:
-        st.info("아직 등록된 친구가 없습니다. 친구의 닉네임을 검색하여 추가해보세요!")
+        st.info("아직 맺어진 친구가 없습니다. 친구의 닉네임을 검색하여 요청을 보내보세요!")
 
-# -------------------- 3. 🔥 7일 내 긴급 상향 (Supabase 520+ 전 종목 기반) --------------------
+# -------------------- 3. 🔥 7일 내 긴급 상향 (토글 접기 + 다중 정렬 & 섹터 필터) --------------------
 elif menu == "🔥 7일 내 긴급 상향":
     st.header("🔥 최근 7일 이내 신규 평가 발표 종목")
     
@@ -881,27 +990,61 @@ elif menu == "🔥 7일 내 긴급 상향":
     urgent_stocks = [format_db_row_to_display(r) for r in db_data if r.get("has_7d")]
 
     if urgent_stocks:
-        st.caption(f"📊 S&P 500 & 나스닥 100 중 최근 7일간 월가 리포트가 발표된 종목: **총 {len(urgent_stocks)}개**")
-        urgent_stocks = sorted(urgent_stocks, key=lambda x: x["raw_score"], reverse=True)
+        # 필터 및 정렬 컨트롤러 바
+        c_sort, c_sec, c_cnt = st.columns([2, 2, 1.5])
+        
+        sort_mode = c_sort.selectbox(
+            "📌 정렬 기준 선택",
+            options=["🏆 모멘텀 점수 높은 순", "⚡ 최근 리포트 순", "📈 목표가 상승여력 순", "📊 14일 총 리포트 수 많은 순"]
+        )
+        
+        sector_filter = c_sec.selectbox(
+            "🏢 섹터 필터",
+            options=["전체 섹터", "빅테크 & IT", "반도체 & 하드웨어", "바이오 & 헬스케어", "금융 & 핀테크", "소비재 & 커머스", "기타"]
+        )
+        
+        # 정렬 로직 적용
+        if sort_mode == "🏆 모멘텀 점수 높은 순":
+            urgent_stocks = sorted(urgent_stocks, key=lambda x: x["raw_score"], reverse=True)
+        elif sort_mode == "📈 목표가 상승여력 순":
+            urgent_stocks = sorted(urgent_stocks, key=lambda x: x["upside_val"], reverse=True)
+        elif sort_mode == "📊 14일 총 리포트 수 많은 순":
+            urgent_stocks = sorted(urgent_stocks, key=lambda x: x["total_reports_count"], reverse=True)
+        elif sort_mode == "⚡ 최근 리포트 순":
+            urgent_stocks = sorted(urgent_stocks, key=lambda x: x.get("updated_at", ""), reverse=True)
+
+        c_cnt.caption(f"\n\n📊 대상: **총 {len(urgent_stocks)}개**")
+        st.markdown("---")
+
         for s in urgent_stocks:
             with st.container():
                 c1, c2, c3 = st.columns([1.2, 2.3, 2.5])
+                
+                # 1열: 점수 및 상승여력
                 c1.metric(f"**{s['티커']}**", f"{s['모멘텀 스코어']}점", s["총 중앙값 (상승여력)"])
+                
+                # 2열: 핵심 요약 지표
                 c2.write(f"• **현재가:** `{s['현재가']}`")
                 c2.write(f"• **탑티어 14D (B/H/S):** `{s['탑티어 14D (B/H/S)']}`")
                 c2.write(f"• **전체 14D (B/H/S):** `{s['전체 14D (B/H/S)']}`")
                 c2.write(f"• **14D 목표가 평균:** {s['14D 목표가 평균']} (범위: {s['14D 최고/최저']})")
                 c2.write(f"• **탑티어 매수사:** {s['탑티어 매수사']}")
 
-                details = [f"- 🔥 {e}" for e in s["최근7일내역"]]
-                if s["8~14일내역"]:
-                    details.extend([f"- ⏱️ {e}" for e in s["8~14일내역"]])
-                c3.info("**14일 내 리포트 이력:**\n\n" + "\n".join(details))
+                # 3열: 14일 리포트 목록을 Expander 토글로 깔끔하게 접기
+                with c3:
+                    details = [f"- 🔥 {e}" for e in s["최근7일내역"]]
+                    if s["8~14일내역"]:
+                        details.extend([f"- ⏱️ {e}" for e in s["8~14일내역"]])
+                    
+                    st.caption(f"최근 7일 발표 **{len(s['최근7일내역'])}건** / 14일 총 **{s['total_reports_count']}건**")
+                    with st.expander("📑 14일 내 리포트 상세 이력 보기 (클릭)", expanded=False):
+                        st.markdown("\n".join(details))
+                
                 st.markdown("---")
     else:
         st.info("현재 모니터링 풀 내에 최근 7일간 신규 평가가 발표된 종목이 없습니다.")
 
-# -------------------- 4. 🏆 14일 모멘텀 랭킹 (Supabase 520+ 전 종목 기반) --------------------
+# -------------------- 4. 🏆 14일 모멘텀 랭킹 --------------------
 elif menu == "🏆 14일 모멘텀 랭킹":
     st.header("🏆 최근 14일 기관 평가 종합 순위 (S&P 500 & 나스닥 100)")
     
@@ -910,7 +1053,7 @@ elif menu == "🏆 14일 모멘텀 랭킹":
         formatted = [format_db_row_to_display(r) for r in db_data]
         df = pd.DataFrame(formatted)
         df_sorted = df.sort_values(by="raw_score", ascending=False).drop(
-            columns=["최근7일내역", "8~14일내역", "downgrades_7d", "raw_score", "raw_price", "has_7d", "has_14d"]
+            columns=["최근7일내역", "8~14일내역", "downgrades_7d", "raw_score", "raw_price", "upside_val", "total_reports_count", "has_7d", "has_14d", "updated_at"]
         )
         st.caption(f"🚀 총 **{len(df_sorted)}개** 미국 핵심 기업 순위 집계 완료")
         st.dataframe(df_sorted, use_container_width=True, hide_index=True)
@@ -926,13 +1069,11 @@ elif menu == "🔍 미국 전 종목 직접 검색 & 차트":
         res = None
         is_live_updated = False
         
-        # [1단계] 실시간 크롤링 & 신규 리포트 분석 & DB 갱신 시도 (원래 목적 달성)
         with st.spinner(f"⚡ {search_ticker} 최신 월가 리포트 실시간 크롤링 및 DB 갱신 중..."):
             res = analyze_and_upsert_stock_live(search_ticker)
             if res:
                 is_live_updated = True
 
-        # [2단계] 야후 일시 차단(429) 등으로 실시간 수집 실패 시 DB 백업 데이터 로드
         if not res:
             try:
                 db_res = supabase.table("stock_analysis").select("*").eq("ticker", search_ticker).execute()
@@ -942,7 +1083,6 @@ elif menu == "🔍 미국 전 종목 직접 검색 & 차트":
                 pass
 
         if res:
-            # 상태 안내 뱃지
             if is_live_updated:
                 st.success(f"✅ **{search_ticker}** 최신 월가 리포트 실시간 분석 완료! (DB 갱신됨)")
             else:
@@ -968,7 +1108,6 @@ elif menu == "🔍 미국 전 종목 직접 검색 & 차트":
             if not res.get("has_14d"):
                 st.warning("⚠️ 최근 14일 이내에 발표된 신규 월가 리포트가 없습니다.")
             
-            # 차트 출력 (res에 hist가 있으면 출력)
             if "hist" in res and res["hist"] is not None and not res["hist"].empty:
                 render_stock_chart(search_ticker, res["hist"])
             else:
