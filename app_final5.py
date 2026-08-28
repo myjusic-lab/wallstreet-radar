@@ -155,16 +155,16 @@ def get_user_profile_by_email(email: str):
         pass
     return None
 
-
 def get_user_profile_by_username(username: str):
-    try:
-        res = supabase.table("profiles").select("*").eq("username", username).execute()
-        if res.data:
-            return res.data[0]
-    except Exception:
-        pass
+    """Supabase 통신 지연 시 최대 2회 재시도"""
+    for _ in range(2):
+        try:
+            res = supabase.table("profiles").select("*").eq("username", username).execute()
+            if res and res.data:
+                return res.data[0]
+        except Exception:
+            pass
     return None
-
 
 def check_username_exists(username: str) -> bool:
     try:
@@ -923,27 +923,61 @@ elif menu == "🔍 미국 전 종목 직접 검색 & 차트":
     search_ticker = st.text_input("분석할 미국 주식 티커 입력 (예: PLTR, CRWD, TSLA, HOOD 등)", value="PLTR").strip().upper()
     
     if search_ticker:
-        with st.spinner(f"{search_ticker} 실시간 분석 및 DB 업데이트 중..."):
-            res = analyze_and_upsert_stock_live(search_ticker)
+        res = None
+        is_live_updated = False
         
+        # [1단계] 실시간 크롤링 & 신규 리포트 분석 & DB 갱신 시도 (원래 목적 달성)
+        with st.spinner(f"⚡ {search_ticker} 최신 월가 리포트 실시간 크롤링 및 DB 갱신 중..."):
+            res = analyze_and_upsert_stock_live(search_ticker)
+            if res:
+                is_live_updated = True
+
+        # [2단계] 야후 일시 차단(429) 등으로 실시간 수집 실패 시 DB 백업 데이터 로드
+        if not res:
+            try:
+                db_res = supabase.table("stock_analysis").select("*").eq("ticker", search_ticker).execute()
+                if db_res.data:
+                    res = format_db_row_to_display(db_res.data[0])
+            except Exception:
+                pass
+
         if res:
+            # 상태 안내 뱃지
+            if is_live_updated:
+                st.success(f"✅ **{search_ticker}** 최신 월가 리포트 실시간 분석 완료! (DB 갱신됨)")
+            else:
+                st.warning(f"⚠️ 야후 실시간 통신 지연으로 오늘 새벽 정기 분석 데이터(DB)를 표시합니다.")
+
             c1, c2, c3 = st.columns(3)
             c1.metric("14D 모멘텀 스코어", f"{res['모멘텀 스코어']}점")
-            c2.metric("탑티어 14D (B/H/S)", res["탑티어 14D (B/H/S)"])
-            c3.metric("전체 14D (B/H/S)", res["전체 14D (B/H/S)"])
+            c2.metric("탑티어 14D (B/H/S)", res.get("탑티어 14D (B/H/S)", "-"))
+            c3.metric("전체 14D (B/H/S)", res.get("전체 14D (B/H/S)", "-"))
             st.markdown("---")
+            
             m1, m2, m3, m4 = st.columns(4)
-            m1.metric("현재가", res["현재가"])
-            m2.metric("총 중앙값(Median)", res["총 중앙값 (상승여력)"])
-            m3.metric("14일 이내 목표가 평균", res["14D 목표가 평균"])
-            m4.metric("14일 이내 최고 / 최저", res["14D 최고/최저"])
-            st.write(f"• **탑티어 매수 추천 증권사:** {res['탑티어 매수사']}")
-            if res["최근7일내역"]:
+            m1.metric("현재가", res.get("현재가", "-"))
+            m2.metric("총 중앙값(Median)", res.get("총 중앙값 (상승여력)", "-"))
+            m3.metric("14일 이내 목표가 평균", res.get("14D 목표가 평균", "-"))
+            m4.metric("14일 이내 최고 / 최저", res.get("14D 최고/최저", "-"))
+            st.write(f"• **탑티어 매수 추천 증권사:** {res.get('탑티어 매수사', '-')}")
+            
+            if res.get("최근7일내역"):
                 st.success("🔥 **최근 7일 이내 긴급 리포트:**\n" + "\n".join([f"- {e}" for e in res["최근7일내역"]]))
-            if res["8~14일내역"]:
+            if res.get("8~14일내역"):
                 st.info("⏱️ **8~14일 전 리포트:**\n" + "\n".join([f"- {e}" for e in res["8~14일내역"]]))
-            if not res["has_14d"]:
+            if not res.get("has_14d"):
                 st.warning("⚠️ 최근 14일 이내에 발표된 신규 월가 리포트가 없습니다.")
-            render_stock_chart(search_ticker, res["hist"])
+            
+            # 차트 출력 (res에 hist가 있으면 출력)
+            if "hist" in res and res["hist"] is not None and not res["hist"].empty:
+                render_stock_chart(search_ticker, res["hist"])
+            else:
+                try:
+                    session = get_yfinance_session()
+                    h_data = yf.Ticker(search_ticker, session=session).history(period="3mo", interval="1d")
+                    if not h_data.empty:
+                        render_stock_chart(search_ticker, h_data)
+                except Exception:
+                    pass
         else:
             st.error("종목 정보를 불러올 수 없습니다. 올바른 티커인지 확인해주세요.")
