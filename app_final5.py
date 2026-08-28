@@ -313,13 +313,14 @@ def delete_friend_relation(my_email: str, friend_email: str) -> bool:
 
 # ==================== 4. 포트폴리오 DB CRUD ====================
 def parse_portfolio_screenshot(image_bytes: bytes) -> list:
-    """Gemini Vision API를 호출하여 토스증권 스크린샷에서 종목명, 수량, 매수가 역산 추출"""
+    """Gemini Vision API를 호출하여 원본 해상도 그대로 종목명, 수량, 매수가 역산 추출"""
     if not GEMINI_API_KEY:
         st.error("❌ GEMINI_API_KEY가 설정되지 않았습니다. Streamlit Secrets를 확인해주세요.")
         return []
 
+    # 원본 이미지 바이트를 100% 고화질 그대로 base64 인코딩
     base64_image = base64.b64encode(image_bytes).decode('utf-8')
-    
+
     prompt = """
     당신은 금융 데이터 추출 전문가입니다. 제공된 토스증권 주식 보유 화면 스크린샷을 분석하여 각 보유 종목의 데이터를 JSON 배열로 추출하세요.
 
@@ -351,36 +352,33 @@ def parse_portfolio_screenshot(image_bytes: bytes) -> list:
         }
     }
 
-    # 구글 서버 권장 최신 지원 모델
-    candidate_models = ["gemini-3.6-flash", "gemini-3.6-pro", "gemini-2.5-flash"]
-    error_logs = []
+    # 정답 단일 모델(gemini-3.6-flash)로 즉시 요청
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={GEMINI_API_KEY}"
 
-    for model_name in candidate_models:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
-        try:
-            response = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=25)
-            
-            if response.status_code == 200:
-                result_json = response.json()
-                candidates = result_json.get("candidates", [])
-                if candidates and "content" in candidates[0]:
-                    text_resp = candidates[0]["content"]["parts"][0]["text"].strip()
-                    
-                    # 마크다운 백틱 제거
-                    if text_resp.startswith("```json"):
-                        text_resp = text_resp[7:]
-                    elif text_resp.startswith("```"):
-                        text_resp = text_resp[3:]
-                    if text_resp.endswith("```"):
-                        text_resp = text_resp[:-3]
-                        
-                    return json.loads(text_resp.strip())
-            else:
-                error_logs.append(f"[{model_name}] HTTP {response.status_code}: {response.text}")
-        except Exception as e:
-            error_logs.append(f"[{model_name}] 통신 에러: {e}")
+    try:
+        # 고용량 원본 처리를 위해 타임아웃을 60초로 넉넉하게 확장
+        response = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=60)
 
-    st.error("❌ AI 이미지 인식 실패\n\n**구글 서버 응답 상세:**\n\n" + "\n\n".join(error_logs))
+        if response.status_code == 200:
+            result_json = response.json()
+            candidates = result_json.get("candidates", [])
+            if candidates and "content" in candidates[0]:
+                text_resp = candidates[0]["content"]["parts"][0]["text"].strip()
+
+                # 마크다운 백틱 제거
+                if text_resp.startswith("```json"):
+                    text_resp = text_resp[7:]
+                elif text_resp.startswith("```"):
+                    text_resp = text_resp[3:]
+                if text_resp.endswith("```"):
+                    text_resp = text_resp[:-3]
+
+                return json.loads(text_resp.strip())
+        else:
+            st.error(f"❌ 구글 AI 서버 응답 오류 (HTTP {response.status_code}): {response.text}")
+    except Exception as e:
+        st.error(f"❌ 통신 지연 오류: {e}")
+
     return []
 
 def load_user_portfolio(user_email: str) -> pd.DataFrame:
