@@ -319,13 +319,12 @@ def parse_portfolio_screenshot(image_bytes: bytes) -> list:
         return []
 
     base64_image = base64.b64encode(image_bytes).decode('utf-8')
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
 
     prompt = """
     당신은 금융 데이터 추출 전문가입니다. 제공된 토스증권 주식 보유 화면 스크린샷을 분석하여 각 보유 종목의 데이터를 JSON 배열로 추출하세요.
 
     [추출 및 계산 규칙]
-    1. 종목명: 한글 종목명은 반드시 공식 미국 주식 티커로 변환 (예: 메타 -> META, 엔비디아 -> NVDA, 코닝 -> GLW, 테슬라 -> TSLA, AST 스페이스모바일 -> ASTS, 로켓 랩 -> RKLB, 마벨 테크놀로지 -> MRVL, 샌디스크 -> WDC, NASA -> NASA, QQQ -> QQQ 등).
+    1. 종목명: 한글 종목명은 반드시 공식 미국 주식 티커로 변환 (예: 메타 -> META, 샌디스크 -> WDC, 엔비디아 -> NVDA, 코닝 -> GLW, 테슬라 -> TSLA, AST 스페이스모바일 -> ASTS, 로켓 랩 -> RKLB, 마벨 테크놀로지 -> MRVL, 스노우플레이크 -> SNOW, 아스테라 랩스 -> ALAB, 앱러빈 -> APP, NASA -> NASA, QQQ -> QQQ 등).
     2. 수량 (quantity): 종목명 아래 '0.005612주' 형태의 소수점 수량을 float 숫자로 추출.
     3. 평가금 (eval) 및 평가손익금 (pnl): 우측에 표시된 금액($) 추출. 손실(-$0.13)은 음수(-0.13), 수익(+$0.50)은 양수(0.50).
     4. 매수 평단가 (buy_price) 역산:
@@ -353,24 +352,27 @@ def parse_portfolio_screenshot(image_bytes: bytes) -> list:
         }
     }
 
-    try:
-        response = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=20)
-        if response.status_code == 200:
-            result_json = response.json()
-            text_resp = result_json["candidates"][0]["content"]["parts"][0]["text"].strip()
-            # 마크다운 백틱 제거
-            if text_resp.startswith("```json"):
-                text_resp = text_resp[7:]
-            if text_resp.startswith("```"):
-                text_resp = text_resp[3:]
-            if text_resp.endswith("```"):
-                text_resp = text_resp[:-3]
-            parsed_data = json.loads(text_resp.strip())
-            return parsed_data
-        else:
-            st.error(f"AI 이미지 인식 실패 (상태코드: {response.status_code}): {response.text}")
-    except Exception as e:
-        st.error(f"이미지 파싱 중 오류 발생: {e}")
+    # 최신 모델 순서대로 자동 시도
+    candidate_models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash-latest"]
+
+    for model_name in candidate_models:
+        url = f"[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/){model_name}:generateContent?key={GEMINI_API_KEY}"
+        try:
+            response = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=25)
+            if response.status_code == 200:
+                result_json = response.json()
+                text_resp = result_json["candidates"][0]["content"]["parts"][0]["text"].strip()
+                if text_resp.startswith("```json"):
+                    text_resp = text_resp[7:]
+                if text_resp.startswith("```"):
+                    text_resp = text_resp[3:]
+                if text_resp.endswith("```"):
+                    text_resp = text_resp[:-3]
+                return json.loads(text_resp.strip())
+        except Exception:
+            continue
+
+    st.error("AI 이미지 인식에 실패했습니다. API 키 및 네트워크 상태를 확인해주세요.")
     return []
 
 def load_user_portfolio(user_email: str) -> pd.DataFrame:
