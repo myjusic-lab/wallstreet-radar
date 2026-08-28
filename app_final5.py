@@ -9,6 +9,8 @@ import hashlib
 import os
 import requests
 from supabase import create_client, Client
+import base64
+import json
 
 st.set_page_config(
     page_title="Wall Street 14D Swing Radar",
@@ -17,6 +19,10 @@ st.set_page_config(
 )
 
 # ==================== 1. API 및 서비스 키 설정 ====================
+GEMINI_API_KEY = ""
+if "GEMINI_API_KEY" in st.secrets:
+    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+
 SUPABASE_URL = "https://ookuwqyveokduoqwmksd.supabase.co"
 SUPABASE_KEY = ""
 ONESIGNAL_APP_ID = ""
@@ -306,6 +312,67 @@ def delete_friend_relation(my_email: str, friend_email: str) -> bool:
 
 
 # ==================== 4. 포트폴리오 DB CRUD ====================
+def parse_portfolio_screenshot(image_bytes: bytes) -> list:
+    """Gemini Vision API를 호출하여 토스증권 스크린샷에서 종목명, 수량, 매수가 역산 추출"""
+    if not GEMINI_API_KEY:
+        st.error("GEMINI_API_KEY가 설정되지 않았습니다. Streamlit Secrets를 확인해주세요.")
+        return []
+
+    base64_image = base64.b64encode(image_bytes).decode('utf-8')
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+
+    prompt = """
+    당신은 금융 데이터 추출 전문가입니다. 제공된 토스증권 주식 보유 화면 스크린샷을 분석하여 각 보유 종목의 데이터를 JSON 배열로 추출하세요.
+
+    [추출 및 계산 규칙]
+    1. 종목명: 한글 종목명은 반드시 공식 미국 주식 티커로 변환 (예: 메타 -> META, 엔비디아 -> NVDA, 코닝 -> GLW, 테슬라 -> TSLA, AST 스페이스모바일 -> ASTS, 로켓 랩 -> RKLB, 마벨 테크놀로지 -> MRVL, 샌디스크 -> WDC, NASA -> NASA, QQQ -> QQQ 등).
+    2. 수량 (quantity): 종목명 아래 '0.005612주' 형태의 소수점 수량을 float 숫자로 추출.
+    3. 평가금 (eval) 및 평가손익금 (pnl): 우측에 표시된 금액($) 추출. 손실(-$0.13)은 음수(-0.13), 수익(+$0.50)은 양수(0.50).
+    4. 매수 평단가 (buy_price) 역산:
+       - 공식: (eval - pnl) / quantity
+       - 계산된 매수 평단가는 소수점 둘째 자리까지 반올림 (round(val, 2)).
+    5. 출력 포맷: 설명이나 마크다운 코드블록(```) 없이 오직 순수한 JSON 리스트만 반환할 것.
+
+    [출력 JSON 예시]
+    [
+      {"ticker": "META", "buy_price": 600.50, "quantity": 0.005612},
+      {"ticker": "NVDA", "buy_price": 214.45, "quantity": 0.166099}
+    ]
+    """
+
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {"inline_data": {"mime_type": "image/jpeg", "data": base64_image}}
+            ]
+        }],
+        "generationConfig": {
+            "temperature": 0.0,
+            "response_mime_type": "application/json"
+        }
+    }
+
+    try:
+        response = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=20)
+        if response.status_code == 200:
+            result_json = response.json()
+            text_resp = result_json["candidates"][0]["content"]["parts"][0]["text"].strip()
+            # 마크다운 백틱 제거
+            if text_resp.startswith("```json"):
+                text_resp = text_resp[7:]
+            if text_resp.startswith("```"):
+                text_resp = text_resp[3:]
+            if text_resp.endswith("```"):
+                text_resp = text_resp[:-3]
+            parsed_data = json.loads(text_resp.strip())
+            return parsed_data
+        else:
+            st.error(f"AI 이미지 인식 실패 (상태코드: {response.status_code}): {response.text}")
+    except Exception as e:
+        st.error(f"이미지 파싱 중 오류 발생: {e}")
+    return []
+
 def load_user_portfolio(user_email: str) -> pd.DataFrame:
     try:
         response = supabase.table("portfolios").select("*").eq("user_email", user_email).execute()
@@ -816,24 +883,60 @@ if menu == "💼 내 투자 (포트폴리오)":
     port_df = load_user_portfolio(user_email)
 
     with st.expander("➕ 보유 종목 추가 / 수정 / 삭제", expanded=port_df.empty):
-        col_in1, col_in2, col_in3, col_in4 = st.columns([2, 2, 2, 1.5])
-        in_ticker = col_in1.text_input("티커 (예: NVDA)", key="in_t").strip().upper()
-        in_price = col_in2.number_input("매수 평단가 ($)", min_value=0.0, step=0.1, key="in_p")
-        in_qty = col_in3.number_input("보유 수량 (주)", min_value=0.0, step=1.0, key="in_q")
+        tab_img, tab_manual = st.tabs(["📸 토스증권 스크린샷 자동 등록", "✍️ 직접 수동 입력"])
 
-        if col_in4.button("DB에 저장", use_container_width=True):
-            if in_ticker and in_price > 0 and in_qty > 0:
-                if save_user_stock(user_email, in_ticker, in_price, in_qty):
-                    analyze_and_upsert_stock_live(in_ticker)
-                    st.success(f"{in_ticker} 저장 및 분석 완료!")
-                    st.rerun()
+        # [탭 1] 스크린샷 업로드 & 자동 등록
+        with tab_img:
+            st.caption("💡 토스증권의 **[평가금 / $]** 보유 화면 캡처 이미지를 업로드하면 전 종목을 자동 인식하여 DB에 덮어씁니다.")
+            uploaded_file = st.file_uploader("토스증권 스크린샷 업로드", type=["png", "jpg", "jpeg"], key="toss_uploader")
+            
+            if uploaded_file is not None:
+                st.image(uploaded_file, caption="업로드된 스크린샷", width=260)
+                
+                if st.button("🚀 AI로 분석하여 포트폴리오 일괄 덮어쓰기", type="primary", use_container_width=True):
+                    with st.spinner("AI가 스크린샷을 분석하여 평단가를 역산 중입니다..."):
+                        img_bytes = uploaded_file.getvalue()
+                        extracted_stocks = parse_portfolio_screenshot(img_bytes)
 
-        if not port_df.empty:
-            del_ticker = st.selectbox("삭제할 종목 선택", options=["선택 안 함"] + list(port_df["티커"].unique()))
-            if st.button("선택 종목 삭제") and del_ticker != "선택 안 함":
-                if delete_user_stock(user_email, del_ticker):
-                    st.warning(f"{del_ticker} 삭제 완료")
-                    st.rerun()
+                    if extracted_stocks:
+                        success_cnt = 0
+                        for item in extracted_stocks:
+                            t = item.get("ticker", "").strip().upper()
+                            p = float(item.get("buy_price", 0.0))
+                            q = float(item.get("quantity", 0.0))
+
+                            if t and p > 0 and q > 0:
+                                # DB 덮어쓰기 (기존 티커 삭제 후 새 수량/평단가 삽입)
+                                if save_user_stock(user_email, t, p, q):
+                                    analyze_and_upsert_stock_live(t)
+                                    success_cnt += 1
+
+                        st.success(f"🎉 총 {success_cnt}개 종목이 성공적으로 포트폴리오에 덮어쓰기 저장되었습니다!")
+                        st.rerun()
+                    else:
+                        st.warning("이미지에서 주식 정보를 인식하지 못했습니다. 선명한 스크린샷인지 확인해주세요.")
+
+        # [탭 2] 기존 수동 입력 및 삭제
+        with tab_manual:
+            col_in1, col_in2, col_in3, col_in4 = st.columns([2, 2, 2, 1.5])
+            in_ticker = col_in1.text_input("티커 (예: NVDA)", key="in_t").strip().upper()
+            in_price = col_in2.number_input("매수 평단가 ($)", min_value=0.0, step=0.1, key="in_p")
+            in_qty = col_in3.number_input("보유 수량 (주)", min_value=0.0, step=0.0001, format="%.6f", key="in_q")
+
+            if col_in4.button("DB에 저장", use_container_width=True):
+                if in_ticker and in_price > 0 and in_qty > 0:
+                    if save_user_stock(user_email, in_ticker, in_price, in_qty):
+                        analyze_and_upsert_stock_live(in_ticker)
+                        st.success(f"{in_ticker} 저장 및 분석 완료!")
+                        st.rerun()
+
+            if not port_df.empty:
+                st.markdown("---")
+                del_ticker = st.selectbox("삭제할 종목 선택", options=["선택 안 함"] + list(port_df["티커"].unique()))
+                if st.button("선택 종목 삭제") and del_ticker != "선택 안 함":
+                    if delete_user_stock(user_email, del_ticker):
+                        st.warning(f"{del_ticker} 삭제 완료")
+                        st.rerun()
 
     if not port_df.empty:
         my_holdings_data = []
