@@ -351,8 +351,8 @@ def parse_portfolio_screenshot(image_bytes: bytes) -> list:
         }
     }
 
-    # 공식 지원 모델 순서대로 요청
-    candidate_models = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro", "gemini-2.0-flash-exp"]
+    # 구글 서버 권장 최신 지원 모델
+    candidate_models = ["gemini-3.6-flash", "gemini-3.6-pro", "gemini-2.5-flash"]
     error_logs = []
 
     for model_name in candidate_models:
@@ -380,7 +380,6 @@ def parse_portfolio_screenshot(image_bytes: bytes) -> list:
         except Exception as e:
             error_logs.append(f"[{model_name}] 통신 에러: {e}")
 
-    # 모든 모델 시도 실패 시 상세 구글 에러 내역 출력
     st.error("❌ AI 이미지 인식 실패\n\n**구글 서버 응답 상세:**\n\n" + "\n\n".join(error_logs))
     return []
 
