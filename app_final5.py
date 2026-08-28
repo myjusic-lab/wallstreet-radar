@@ -315,11 +315,11 @@ def delete_friend_relation(my_email: str, friend_email: str) -> bool:
 def parse_portfolio_screenshot(image_bytes: bytes) -> list:
     """Gemini Vision API를 호출하여 토스증권 스크린샷에서 종목명, 수량, 매수가 역산 추출"""
     if not GEMINI_API_KEY:
-        st.error("GEMINI_API_KEY가 설정되지 않았습니다. Streamlit Secrets를 확인해주세요.")
+        st.error("❌ GEMINI_API_KEY가 설정되지 않았습니다. Streamlit Secrets를 확인해주세요.")
         return []
 
     base64_image = base64.b64encode(image_bytes).decode('utf-8')
-
+    
     prompt = """
     당신은 금융 데이터 추출 전문가입니다. 제공된 토스증권 주식 보유 화면 스크린샷을 분석하여 각 보유 종목의 데이터를 JSON 배열로 추출하세요.
 
@@ -330,7 +330,7 @@ def parse_portfolio_screenshot(image_bytes: bytes) -> list:
     4. 매수 평단가 (buy_price) 역산:
        - 공식: (eval - pnl) / quantity
        - 계산된 매수 평단가는 소수점 둘째 자리까지 반올림 (round(val, 2)).
-    5. 출력 포맷: 설명이나 마크다운 코드블록(```) 없이 오직 순수한 JSON 리스트만 반환할 것.
+    5. 출력 포맷: 설명이나 부가 설명 없이 오직 순수한 JSON 리스트만 반환할 것.
 
     [출력 JSON 예시]
     [
@@ -347,32 +347,41 @@ def parse_portfolio_screenshot(image_bytes: bytes) -> list:
             ]
         }],
         "generationConfig": {
-            "temperature": 0.0,
-            "response_mime_type": "application/json"
+            "temperature": 0.0
         }
     }
 
-    # 최신 모델 순서대로 자동 시도
-    candidate_models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash-latest"]
+    # 공식 지원 모델 순서대로 요청
+    candidate_models = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro", "gemini-2.0-flash-exp"]
+    error_logs = []
 
     for model_name in candidate_models:
-        url = f"[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/){model_name}:generateContent?key={GEMINI_API_KEY}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
         try:
             response = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=25)
+            
             if response.status_code == 200:
                 result_json = response.json()
-                text_resp = result_json["candidates"][0]["content"]["parts"][0]["text"].strip()
-                if text_resp.startswith("```json"):
-                    text_resp = text_resp[7:]
-                if text_resp.startswith("```"):
-                    text_resp = text_resp[3:]
-                if text_resp.endswith("```"):
-                    text_resp = text_resp[:-3]
-                return json.loads(text_resp.strip())
-        except Exception:
-            continue
+                candidates = result_json.get("candidates", [])
+                if candidates and "content" in candidates[0]:
+                    text_resp = candidates[0]["content"]["parts"][0]["text"].strip()
+                    
+                    # 마크다운 백틱 제거
+                    if text_resp.startswith("```json"):
+                        text_resp = text_resp[7:]
+                    elif text_resp.startswith("```"):
+                        text_resp = text_resp[3:]
+                    if text_resp.endswith("```"):
+                        text_resp = text_resp[:-3]
+                        
+                    return json.loads(text_resp.strip())
+            else:
+                error_logs.append(f"[{model_name}] HTTP {response.status_code}: {response.text}")
+        except Exception as e:
+            error_logs.append(f"[{model_name}] 통신 에러: {e}")
 
-    st.error("AI 이미지 인식에 실패했습니다. API 키 및 네트워크 상태를 확인해주세요.")
+    # 모든 모델 시도 실패 시 상세 구글 에러 내역 출력
+    st.error("❌ AI 이미지 인식 실패\n\n**구글 서버 응답 상세:**\n\n" + "\n\n".join(error_logs))
     return []
 
 def load_user_portfolio(user_email: str) -> pd.DataFrame:
