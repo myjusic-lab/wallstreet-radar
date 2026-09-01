@@ -1,0 +1,32 @@
+name: 10-Min Wall Street Report Monitor
+
+on:
+  schedule:
+    # 월~금요일 미국 장 운영 시간대 (UTC 12~22시 = 한국시간 21:00~07:00, 10분마다 실행)
+    - cron: '*/10 12-22 * * 1-5'
+  workflow_dispatch: # Actions 탭에서 수동 즉시 실행 가능
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          pip install requests pandas yfinance supabase
+
+      - name: Run Market Radar Check
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          ONESIGNAL_APP_ID: ${{ secrets.ONESIGNAL_APP_ID }}
+          ONESIGNAL_API_KEY: ${{ secrets.ONESIGNAL_API_KEY }}
+        run: |
+          python monitor_worker.py
