@@ -47,7 +47,69 @@ def hash_pw(password: str) -> str:
     return hashlib.sha256(password.encode('utf-8')).hexdigest()
 
 
-# ==================== 2. 프로필 & 친구 관리 DB CRUD (함수 우선 정의) ====================
+# ==================== 2. OneSignal 웹 푸시 스크립트 정의 ====================
+def inject_onesignal_script(user_email: str):
+    """최상위 브라우저 창(window.parent)에 OneSignal SDK를 직접 주입하여 서비스 워커 및 구독자 등록 보장"""
+    if not ONESIGNAL_APP_ID:
+        return
+    components.html(
+        f"""
+        <script>
+        try {{
+            const parentDoc = window.parent.document;
+            
+            if (!parentDoc.getElementById('onesignal-sdk-script')) {{
+                // 1. OneSignal v16 SDK 로드
+                const sdkScript = parentDoc.createElement('script');
+                sdkScript.id = 'onesignal-sdk-script';
+                sdkScript.src = 'https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js';
+                sdkScript.defer = true;
+                parentDoc.head.appendChild(sdkScript);
+
+                // 2. 초기화 및 최상위 권한 프롬프트 실행
+                const initScript = parentDoc.createElement('script');
+                initScript.innerHTML = `
+                    window.OneSignalDeferred = window.OneSignalDeferred || [];
+                    OneSignalDeferred.push(async function(OneSignal) {{
+                        await OneSignal.init({{
+                            appId: "{ONESIGNAL_APP_ID}",
+                            allowLocalhostAsSecureOrigin: true,
+                            serviceWorkerParam: {{ scope: '/' }}
+                        }});
+                        
+                        // 브라우저 최상단에서 알림 권한 팝업 실행
+                        await OneSignal.Slidedown.promptPush();
+                        
+                        if ("{user_email}") {{
+                            await OneSignal.User.addTag("user_email", "{user_email}");
+                        }}
+                    }});
+                `;
+                parentDoc.head.appendChild(initScript);
+            }} else {{
+                // 이미 SDK가 로드된 경우 이메일 태그 등록
+                const updateTagScript = parentDoc.createElement('script');
+                updateTagScript.innerHTML = `
+                    window.OneSignalDeferred = window.OneSignalDeferred || [];
+                    OneSignalDeferred.push(async function(OneSignal) {{
+                        if ("{user_email}") {{
+                            await OneSignal.User.addTag("user_email", "{user_email}");
+                        }}
+                    }});
+                `;
+                parentDoc.head.appendChild(updateTagScript);
+            }}
+        }} catch (e) {{
+            console.error("OneSignal injection error:", e);
+        }}
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+
+
+# ==================== 3. 프로필 & 친구 관리 DB CRUD ====================
 def get_user_profile_by_email(email: str):
     for _ in range(2):
         try:
@@ -196,17 +258,16 @@ def delete_friend_relation(my_email: str, friend_email: str) -> bool:
             f"and(user_email.eq.{my_email},friend_email.eq.{friend_email}),and(user_email.eq.{friend_email},friend_email.eq.{my_email})"
         ).execute()
         return True
-    except Exception:
+    except Exception as e:
         return False
 
 
-# ==================== 3. 세션 복원 및 자동 로그인 제어 ====================
+# ==================== 4. 세션 복원 및 자동 로그인 제어 ====================
 if "user_email" not in st.session_state:
     st.session_state["user_email"] = None
 if "google_auth_email" not in st.session_state:
     st.session_state["google_auth_email"] = None
 
-# URL 쿼리 파라미터 읽기
 try:
     token = st.query_params.get("access_token")
     code = st.query_params.get("code")
@@ -217,7 +278,7 @@ except AttributeError:
     code = qp.get("code", [None])[0]
     url_user = qp.get("user", [None])[0] or qp.get("auto_login", [None])[0]
 
-# 1. URL 파라미터 기반 세션 자동 복원 (새로고침 / 백그라운드 복귀 완벽 대응)
+# 1. URL 파라미터 기반 세션 자동 복원
 if url_user and not st.session_state["user_email"]:
     prof = get_user_profile_by_email(url_user)
     if prof:
@@ -295,7 +356,7 @@ components.html(
 )
 
 
-# ==================== 4. 포트폴리오 DB CRUD & Gemini Vision ====================
+# ==================== 5. 포트폴리오 DB CRUD & Gemini Vision ====================
 TICKER_CORRECTION_MAP = {
     "SPACEX": "SPCX",
     "SPACE": "SPCX",
@@ -429,7 +490,7 @@ def delete_user_stock(user_email: str, ticker: str) -> bool:
         return False
 
 
-# ==================== 5. 퀀트 분석 엔진 & DB 연동 캐시 ====================
+# ==================== 6. 퀀트 분석 엔진 & DB 연동 캐시 ====================
 GICS_SECTOR_KR = {
     "Technology": "빅테크 & IT",
     "Financial Services": "금융 & 핀테크",
@@ -737,7 +798,7 @@ def render_stock_chart(ticker: str, hist: pd.DataFrame):
     st.plotly_chart(fig, use_container_width=True)
 
 
-# ==================== 6. 뷰 분기 (인증 게이트) ====================
+# ==================== 7. 뷰 분기 (인증 게이트) ====================
 if not st.session_state["user_email"]:
     st.write("")
     st.write("")
@@ -857,50 +918,11 @@ if not st.session_state["user_email"]:
                                     st.rerun()
     st.stop()
 
-# ==================== 7. 메인 대시보드 (로그인 완료) ====================
+# ==================== 8. 메인 대시보드 (로그인 완료) ====================
 user_email = st.session_state["user_email"]
 profile = get_user_profile_by_email(user_email)
 
-# OneSignal 푸시 스크립트 실행
-def inject_onesignal_script(user_email: str):
-    if not ONESIGNAL_APP_ID:
-        return
-    components.html(
-        f"""
-        <script src="[https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js](https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js)" defer></script>
-        <script>
-          window.OneSignalDeferred = window.OneSignalDeferred || [];
-          OneSignalDeferred.push(async function(OneSignal) {{
-            await OneSignal.init({{
-              appId: "{ONESIGNAL_APP_ID}",
-              allowLocalhostAsSecureOrigin: true,
-              promptOptions: {{
-                slidedown: {{
-                  prompts: [
-                    {{
-                      type: "push",
-                      autoPrompt: true,
-                      text: {{
-                        actionMessage: "월가 1·2티어 기관의 신규 리포트 및 목표가 변동 알림을 받으시겠습니까?",
-                        acceptButton: "알림 켜기",
-                        cancelButton: "나중에"
-                      }}
-                    }}
-                  ]
-                }}
-              }}
-            }});
-            OneSignal.Slidedown.promptPush();
-            if ("{user_email}") {{
-              OneSignal.User.addTag("user_email", "{user_email}");
-            }}
-          }});
-        </script>
-        """,
-        height=0,
-        width=0,
-    )
-
+# 최상위 OneSignal 푸시 등록 실행
 inject_onesignal_script(user_email)
 
 my_username = profile["username"] if profile else "User"
