@@ -3,15 +3,27 @@ import os
 import yfinance as yf
 import datetime
 import requests
-from supabase import create_client
+import pandas as pd
+from supabase import create_client, Client
 
-# ==================== 설정 (환경변수 / Secrets에서 안전하게 로드) ====================
+# ==================== 설정 ====================
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://ookuwqyveokduoqwmksd.supabase.co")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 ONESIGNAL_APP_ID = os.environ.get("ONESIGNAL_APP_ID", "")
 ONESIGNAL_API_KEY = os.environ.get("ONESIGNAL_API_KEY", "")
 
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+
+def get_yfinance_session():
+    """Yahoo Finance 봇 차단(429 Rate Limit) 방지 세션"""
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5"
+    })
+    return session
 
 
 def send_web_push(user_email: str, title: str, message: str):
@@ -33,7 +45,7 @@ def send_web_push(user_email: str, title: str, message: str):
         "contents": {"en": message, "ko": message}
     }
     try:
-        res = requests.post("https://onesignal.com/api/v1/notifications", headers=headers, json=payload)
+        res = requests.post("https://onesignal.com/api/v1/notifications", headers=headers, json=payload, timeout=10)
         print(f"[{user_email}] 푸시 발송 응답: {res.status_code}")
     except Exception as e:
         print(f"푸시 발송 에러: {e}")
@@ -52,35 +64,52 @@ def run_market_radar_check():
         print("등록된 보유 종목이 없습니다.")
         return
 
+    # 종목별 구독 유저 이메일 매핑
     ticker_users = {}
     for row in port_res.data:
         ticker = row["ticker"].strip().upper()
         email = row["user_email"]
         ticker_users.setdefault(ticker, []).append(email)
 
+    session = get_yfinance_session()
     now = datetime.datetime.now()
-    yesterday = now - datetime.timedelta(days=1)
+    # 시차 및 주말 딜레이를 고려하여 최근 48시간 이내 리포트 탐색
+    recent_window = now - datetime.timedelta(days=2)
 
     for ticker, emails in ticker_users.items():
         try:
-            stock = yf.Ticker(ticker)
+            stock = yf.Ticker(ticker, session=session)
             upgrades = stock.upgrades_downgrades
             if upgrades is None or upgrades.empty:
                 continue
 
-            if upgrades.index.tz is not None:
-                upgrades.index = upgrades.index.tz_localize(None)
+            # 날짜 표준화 (컬럼 / 인덱스 호환성 보장)
+            df_up = upgrades.copy()
+            if "GradeDate" in df_up.columns:
+                df_up["Date"] = pd.to_datetime(df_up["GradeDate"])
+            elif "Date" in df_up.columns:
+                df_up["Date"] = pd.to_datetime(df_up["Date"])
+            else:
+                df_up["Date"] = pd.to_datetime(df_up.index)
 
-            new_reports = upgrades[upgrades.index >= yesterday]
+            if df_up["Date"].dt.tz is not None:
+                df_up["Date"] = df_up["Date"].dt.tz_localize(None)
+
+            new_reports = df_up[df_up["Date"] >= recent_window].sort_values(by="Date", ascending=False)
             if new_reports.empty:
                 continue
 
-            for date, row in new_reports.iterrows():
+            for _, row in new_reports.iterrows():
+                date_val = row["Date"]
                 firm = str(row.get('Firm', '')).strip()
                 to_grade = str(row.get('ToGrade', '')).strip()
                 action = str(row.get('Action', '')).strip().upper()
 
-                alert_id = f"{ticker}_{firm}_{date.strftime('%Y%m%d')}_{to_grade}"
+                if not firm or not to_grade:
+                    continue
+
+                # 고유 알림 ID 생성 (중복 발송 방지)
+                alert_id = f"{ticker}_{firm}_{date_val.strftime('%Y%m%d')}_{to_grade}"
 
                 dup = supabase.table("sent_alerts").select("id").eq("alert_id", alert_id).execute()
                 if not dup.data:
@@ -91,7 +120,7 @@ def run_market_radar_check():
                         send_web_push(email, title, body)
 
                     supabase.table("sent_alerts").insert({"alert_id": alert_id}).execute()
-                    print(f"새 알림 전송 완료: {title}")
+                    print(f"새 알림 전송 완료: {title} ({firm} -> {to_grade})")
         except Exception as e:
             print(f"[{ticker}] 리포트 체크 에러: {e}")
 
