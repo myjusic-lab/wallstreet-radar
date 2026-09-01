@@ -16,8 +16,7 @@ if not SUPABASE_KEY:
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ==================== 2. 월가 기관 등급 정의 ====================
-# 11대 GICS 글로벌 표준 섹터 한글 매핑 (100% 자동 분류)
+# ==================== 2. 월가 기관 및 글로벌 11대 섹터 정의 ====================
 GICS_SECTOR_KR = {
     "Technology": "빅테크 & IT",
     "Financial Services": "금융 & 핀테크",
@@ -69,7 +68,7 @@ def fetch_sp500_and_nasdaq100_tickers() -> list:
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     }
 
-    # 1) S&P 500 (약 503개)
+    # 1) S&P 500
     try:
         url_sp500 = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
         resp = requests.get(url_sp500, headers=headers, timeout=15)
@@ -81,7 +80,7 @@ def fetch_sp500_and_nasdaq100_tickers() -> list:
     except Exception as e:
         print(f"⚠️ S&P 500 수집 실패: {e}")
 
-    # 2) 나스닥 100 (약 101개)
+    # 2) 나스닥 100
     try:
         url_ndx = "https://en.wikipedia.org/wiki/Nasdaq-100"
         resp = requests.get(url_ndx, headers=headers, timeout=15)
@@ -100,7 +99,6 @@ def fetch_sp500_and_nasdaq100_tickers() -> list:
     except Exception as e:
         print(f"⚠️ 나스닥 100 수집 실패: {e}")
 
-    # 비상용 기본 티커 풀 (크롤링 차단 시 대비)
     if len(tickers) < 50:
         fallback = [
             "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "PLTR", "AMD",
@@ -124,7 +122,7 @@ def analyze_and_upsert_stock(ticker: str, session: requests.Session) -> bool:
 
         current_price = 0.0
         target_mean, target_median, target_high, target_low = 0.0, 0.0, 0.0, 0.0
-        sector_kr = "기타"  # 👈 1. 기본값 설정
+        sector_kr = "기타"
 
         try:
             info = stock.info
@@ -133,9 +131,9 @@ def analyze_and_upsert_stock(ticker: str, session: requests.Session) -> bool:
             target_median = float(info.get('targetMedianPrice', target_mean) or 0.0)
             target_high = float(info.get('targetHighPrice', 0.0) or 0.0)
             target_low = float(info.get('targetLowPrice', 0.0) or 0.0)
-
-            en_sec = info.get('sector', '')                # 👈 2. 영문 섹터 가져오기
-            sector_kr = GICS_SECTOR_KR.get(en_sec, "기타")  # 👈 3. 한글 섹터로 변환
+            
+            en_sec = info.get('sector', '')
+            sector_kr = GICS_SECTOR_KR.get(en_sec, "기타")
         except Exception:
             pass
 
@@ -157,13 +155,23 @@ def analyze_and_upsert_stock(ticker: str, session: requests.Session) -> bool:
         try:
             upgrades = stock.upgrades_downgrades
             if upgrades is not None and not upgrades.empty:
-                if upgrades.index.tz is not None:
-                    upgrades.index = upgrades.index.tz_localize(None)
+                # 1. 날짜 표준화 (컬럼 / 인덱스 호환성 완벽 보장)
+                df_up = upgrades.copy()
+                if "GradeDate" in df_up.columns:
+                    df_up["Date"] = pd.to_datetime(df_up["GradeDate"])
+                elif "Date" in df_up.columns:
+                    df_up["Date"] = pd.to_datetime(df_up["Date"])
+                else:
+                    df_up["Date"] = pd.to_datetime(df_up.index)
 
-                valid_data = upgrades[upgrades.index >= fourteen_days_ago].sort_index(ascending=False)
+                if df_up["Date"].dt.tz is not None:
+                    df_up["Date"] = df_up["Date"].dt.tz_localize(None)
+
+                valid_data = df_up[df_up["Date"] >= fourteen_days_ago].sort_values(by="Date", ascending=False)
                 seen_firms = set()
 
-                for date, row in valid_data.iterrows():
+                for _, row in valid_data.iterrows():
+                    date_val = row["Date"]
                     firm = str(row.get('Firm', '')).strip()
                     to_grade = str(row.get('ToGrade', ''))
                     action = str(row.get('Action', '')).lower()
@@ -190,11 +198,11 @@ def analyze_and_upsert_stock(ticker: str, session: requests.Session) -> bool:
                     is_top_tier = is_tier1 or is_tier2
 
                     category = classify_grade(to_grade)
-                    is_within_7d = (date >= seven_days_ago)
+                    is_within_7d = (date_val >= seven_days_ago)
 
                     tier_badge = "👑[1티어]" if is_tier1 else ("⭐[2티어]" if is_tier2 else "[일반]")
                     tp_text = f" (${row_tp:g})" if row_tp is not None else ""
-                    event_text = f"[{date.strftime('%m/%d')}] {tier_badge} {firm}: {to_grade} ({action.upper()}){tp_text}"
+                    event_text = f"[{date_val.strftime('%m/%d')}] {tier_badge} {firm}: {to_grade} ({action.upper()}){tp_text}"
 
                     if is_within_7d:
                         recent_7d_events.append(event_text)
@@ -249,7 +257,7 @@ def analyze_and_upsert_stock(ticker: str, session: requests.Session) -> bool:
         if top_tier_buyers_14d: top_buyers_all.append(f"8~14일: {', '.join(top_tier_buyers_14d)}")
         buyers_display = " | ".join(top_buyers_all) if top_buyers_all else "-"
 
-        # Supabase stock_analysis 테이블에 Upsert
+        # Supabase stock_analysis 테이블에 Upsert (섹터 포함)
         row_data = {
             "ticker": ticker,
             "sector": sector_kr,
@@ -297,7 +305,6 @@ def run_daily_batch():
         else:
             print(f"[{idx}/{total}] ⚠️ {ticker} 분석 건너뜀")
         
-        # 야후 429 차단 방지 지연 (0.8초)
         time.sleep(0.8)
 
     elapsed = round((time.time() - start_time) / 60, 1)
