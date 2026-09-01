@@ -89,11 +89,14 @@ def inject_onesignal_script(user_email: str):
     )
 
 
+# ==================== 자동 로그인 & 세션 복원 스크립트 ====================
 components.html(
     """
     <script>
     try {
         const parentLoc = window.parent.location;
+        
+        // 1. 구글 OAuth 해시 토큰 처리
         if (parentLoc.hash && parentLoc.hash.includes('access_token')) {
             const hash = parentLoc.hash.substring(1);
             const params = new URLSearchParams(hash);
@@ -101,6 +104,13 @@ components.html(
             if (accessToken) {
                 parentLoc.href = parentLoc.origin + parentLoc.pathname + '?access_token=' + accessToken;
             }
+        }
+        
+        // 2. 브라우저 localStorage에 저장된 자동 로그인 토큰 복원
+        const savedUser = localStorage.getItem("ws_auto_login_email");
+        if (savedUser && !parentLoc.search.includes('auto_login=') && !parentLoc.search.includes('access_token=')) {
+            const separator = parentLoc.search ? '&' : '?';
+            parentLoc.href = parentLoc.origin + parentLoc.pathname + parentLoc.search + separator + 'auto_login=' + encodeURIComponent(savedUser);
         }
     } catch (e) {
         console.error(e);
@@ -116,14 +126,24 @@ if "user_email" not in st.session_state:
 if "google_auth_email" not in st.session_state:
     st.session_state["google_auth_email"] = None
 
+# URL 쿼리 파라미터 읽기
 try:
     token = st.query_params.get("access_token")
     code = st.query_params.get("code")
+    auto_email = st.query_params.get("auto_login")
 except AttributeError:
     qp = st.experimental_get_query_params()
     token = qp.get("access_token", [None])[0]
     code = qp.get("code", [None])[0]
+    auto_email = qp.get("auto_login", [None])[0]
 
+# 1. 자동 로그인 처리 (localStorage 기반)
+if auto_email and not st.session_state["user_email"]:
+    prof = get_user_profile_by_email(auto_email)
+    if prof:
+        st.session_state["user_email"] = auto_email
+
+# 2. 구글 OAuth 토큰 교환 처리
 if token and not st.session_state["user_email"] and not st.session_state["google_auth_email"]:
     try:
         user_res = supabase.auth.get_user(token)
@@ -760,8 +780,16 @@ if not st.session_state["user_email"]:
                     else:
                         user_prof = verify_user_login(in_uname, in_pwd)
                         if user_prof:
-                            st.session_state["user_email"] = user_prof["user_email"]
-                            st.success(f"환영합니다, @{in_uname}님!")
+                            u_email = user_prof["user_email"]
+                            st.session_state["user_email"] = u_email
+                            
+                            # 브라우저에 영구 로그인 토큰 저장
+                            components.html(f"""
+                            <script>
+                                localStorage.setItem("ws_auto_login_email", "{u_email}");
+                                window.parent.location.href = window.parent.location.origin + window.parent.location.pathname + '?auto_login={u_email}';
+                            </script>
+                            """, height=0)
                             st.rerun()
                         else:
                             st.error("아이디 또는 비밀번호가 일치하지 않습니다.")
@@ -825,7 +853,14 @@ if not st.session_state["user_email"]:
                                 if register_user(g_email, reg_uname, reg_pwd):
                                     st.session_state["user_email"] = g_email
                                     st.session_state["google_auth_email"] = None
-                                    st.success(f"가입이 완료되었습니다, @{reg_uname}님!")
+                                    
+                                    # 브라우저에 영구 로그인 토큰 저장
+                                    components.html(f"""
+                                    <script>
+                                        localStorage.setItem("ws_auto_login_email", "{g_email}");
+                                        window.parent.location.href = window.parent.location.origin + window.parent.location.pathname + '?auto_login={g_email}';
+                                    </script>
+                                    """, height=0)
                                     st.rerun()
     st.stop()
 
@@ -841,8 +876,26 @@ is_public = profile.get("is_portfolio_public", True) if profile else True
 # 사이드바
 with st.sidebar:
     st.markdown("---")
-    if st.button("🔄 최신 데이터 새로고침", use_container_width=True):
-        st.cache_data.clear()
+    if st.button("로그아웃", use_container_width=True):
+        try:
+            supabase.auth.sign_out()
+        except:
+            pass
+        st.session_state["user_email"] = None
+        st.session_state["google_auth_email"] = None
+        
+        # 브라우저 저장소의 로그인 토큰 삭제 후 메인으로 이동
+        components.html("""
+        <script>
+            localStorage.removeItem("ws_auto_login_email");
+            window.parent.location.href = window.parent.location.origin + window.parent.location.pathname;
+        </script>
+        """, height=0)
+        
+        try:
+            st.query_params.clear()
+        except:
+            st.experimental_set_query_params()
         st.rerun()
     
     st.markdown("### ⚡ Wall Street Radar")
