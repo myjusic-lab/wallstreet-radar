@@ -342,7 +342,7 @@ def parse_portfolio_screenshot(image_bytes: bytes) -> list:
     당신은 금융 데이터 추출 전문가입니다. 제공된 토스증권 주식 보유 화면 스크린샷을 분석하여 각 보유 종목의 데이터를 JSON 배열로 추출하세요.
 
     [추출 및 계산 규칙]
-    1. 종목명: 한글 종목명은 반드시 공식 미국 주식 티커로 변환 (예: 메타 -> META, 엔비디아 -> NVDA, 코닝 -> GLW, 테슬라 -> TSLA, AST 스페이스모바일 -> ASTS, 로켓 랩 -> RKLB, 마벨 테크놀로지 -> MRVL, 스노우플레이크 -> SNOW, 아스테라 랩스 -> ALAB, 앱러빈 -> APP, QQQ -> QQQ 등).
+    1. 종목명: 한글 종목명은 반드시 공식 미국 주식 티커로 변환 (예: 메타 -> META, 샌디스크 -> SNDK, 엔비디아 -> NVDA, 코닝 -> GLW, 테슬라 -> TSLA, AST 스페이스모바일 -> ASTS, 로켓 랩 -> RKLB, 마벨 테크놀로지 -> MRVL, 스노우플레이크 -> SNOW, 아스테라 랩스 -> ALAB, 앱러빈 -> APP, QQQ -> QQQ 등).
     2. 수량 (quantity): 종목명 아래 '0.005612주' 형태의 소수점 수량을 float 숫자로 추출.
     3. 평가금 (eval) 및 평가손익금 (pnl): 우측에 표시된 금액($) 추출. 손실(-$0.13)은 음수(-0.13), 수익(+$0.50)은 양수(0.50).
     4. 매수 평단가 (buy_price) 역산:
@@ -517,7 +517,6 @@ def analyze_and_upsert_stock_live(ticker: str):
             target_high = float(info.get('targetHighPrice', 0.0) or 0.0)
             target_low = float(info.get('targetLowPrice', 0.0) or 0.0)
             
-            # 1. 11대 GICS 섹터 한글 변환 적용
             en_sec = info.get('sector', '')
             sector_kr = GICS_SECTOR_KR.get(en_sec, "기타")
         except Exception:
@@ -540,7 +539,6 @@ def analyze_and_upsert_stock_live(ticker: str):
         try:
             upgrades = stock.upgrades_downgrades
             if upgrades is not None and not upgrades.empty:
-                # 2. 날짜/인덱스 파싱 버그 수정 (8월 25일 멈춤 방지)
                 df_up = upgrades.copy()
                 if "GradeDate" in df_up.columns:
                     df_up["Date"] = pd.to_datetime(df_up["GradeDate"])
@@ -642,10 +640,10 @@ def analyze_and_upsert_stock_live(ticker: str):
         if top_tier_buyers_14d: top_buyers_all.append(f"8~14일: {', '.join(top_tier_buyers_14d)}")
         buyers_display = " | ".join(top_buyers_all) if top_buyers_all else "-"
 
-        # 3. Supabase stock_analysis DB에 저장 (sector 포함)
+        # Supabase stock_analysis DB에 저장 (sector 포함)
         row_data = {
             "ticker": ticker,
-            "sector": sector_kr,  # 👈 섹터 데이터 누락 수정
+            "sector": sector_kr,
             "score": final_score,
             "current_price": current_price,
             "target_median": target_median,
@@ -667,12 +665,6 @@ def analyze_and_upsert_stock_live(ticker: str):
             supabase.table("stock_analysis").upsert(row_data).execute()
         except Exception:
             pass
-
-        res_dict = format_db_row_to_display(row_data)
-        res_dict["hist"] = hist
-        return res_dict
-    except Exception:
-        return None
 
         res_dict = format_db_row_to_display(row_data)
         res_dict["hist"] = hist
@@ -876,7 +868,20 @@ is_public = profile.get("is_portfolio_public", True) if profile else True
 # 사이드바
 with st.sidebar:
     st.markdown("---")
-    if st.button("로그아웃", use_container_width=True):
+    if st.button("🔄 최신 데이터 새로고침", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
+    
+    st.markdown("### ⚡ Wall Street Radar")
+    st.write(f"👤 아이디: **@{my_username}**")
+    st.caption(f"이메일: {user_email}")
+
+    public_toggle = st.toggle("🔒 친구에게 내 종목 공개", value=is_public)
+    if public_toggle != is_public:
+        update_privacy_setting(user_email, public_toggle)
+        st.rerun()
+
+    if st.button("로그아웃", use_container_width=True, key="btn_sidebar_logout"):
         try:
             supabase.auth.sign_out()
         except:
@@ -892,28 +897,6 @@ with st.sidebar:
         </script>
         """, height=0)
         
-        try:
-            st.query_params.clear()
-        except:
-            st.experimental_set_query_params()
-        st.rerun()
-    
-    st.markdown("### ⚡ Wall Street Radar")
-    st.write(f"👤 아이디: **@{my_username}**")
-    st.caption(f"이메일: {user_email}")
-
-    public_toggle = st.toggle("🔒 친구에게 내 종목 공개", value=is_public)
-    if public_toggle != is_public:
-        update_privacy_setting(user_email, public_toggle)
-        st.rerun()
-
-    if st.button("로그아웃", use_container_width=True):
-        try:
-            supabase.auth.sign_out()
-        except:
-            pass
-        st.session_state["user_email"] = None
-        st.session_state["google_auth_email"] = None
         try:
             st.query_params.clear()
         except:
@@ -1058,7 +1041,7 @@ if menu == "💼 내 투자 (포트폴리오)":
     else:
         st.info("현재 등록된 보유 종목이 없습니다. 위의 메뉴를 통해 입력해보세요.")
 
-# -------------------- 2. 👥 친구 포트폴리오 (친구요청함 & 수락/거절 시스템) --------------------
+# -------------------- 2. 👥 친구 포트폴리오 --------------------
 elif menu == "👥 친구 포트폴리오":
     st.header("👥 친구 포트폴리오 피드")
 
