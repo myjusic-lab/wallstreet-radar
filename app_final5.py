@@ -212,11 +212,9 @@ def update_privacy_setting(email: str, is_public: bool):
         pass
 
 
-# ----- 친구 요청 및 수락/거절 시스템 -----
 def send_friend_request(my_email: str, target_email: str) -> str:
-    """친구 요청 보내기 (중복 검사 및 상태 처리)"""
+    """친구 요청 보내기"""
     try:
-        # 이미 존재하는 관계 확인
         res = supabase.table("friendships").select("*").or_(
             f"and(user_email.eq.{my_email},friend_email.eq.{target_email}),and(user_email.eq.{target_email},friend_email.eq.{my_email})"
         ).execute()
@@ -229,7 +227,7 @@ def send_friend_request(my_email: str, target_email: str) -> str:
                 if existing.get("user_email") == my_email:
                     return "ALREADY_SENT"
                 else:
-                    return "NEED_ACCEPT" # 상대방이 이미 나에게 요청을 보낸 상태
+                    return "NEED_ACCEPT"
 
         supabase.table("friendships").insert({
             "user_email": my_email,
@@ -311,21 +309,20 @@ def delete_friend_relation(my_email: str, friend_email: str) -> bool:
         return False
 
 
-# ==================== 4. 포트폴리오 DB CRUD ====================
+# ==================== 4. 포트폴리오 DB CRUD & Gemini Vision ====================
 def parse_portfolio_screenshot(image_bytes: bytes) -> list:
     """Gemini Vision API를 호출하여 원본 해상도 그대로 종목명, 수량, 매수가 역산 추출"""
     if not GEMINI_API_KEY:
         st.error("❌ GEMINI_API_KEY가 설정되지 않았습니다. Streamlit Secrets를 확인해주세요.")
         return []
 
-    # 원본 이미지 바이트를 100% 고화질 그대로 base64 인코딩
     base64_image = base64.b64encode(image_bytes).decode('utf-8')
 
     prompt = """
     당신은 금융 데이터 추출 전문가입니다. 제공된 토스증권 주식 보유 화면 스크린샷을 분석하여 각 보유 종목의 데이터를 JSON 배열로 추출하세요.
 
     [추출 및 계산 규칙]
-    1. 종목명: 한글 종목명은 반드시 공식 미국 주식 티커로 변환 (예: 메타 -> META, 샌디스크 -> SNDK, 엔비디아 -> NVDA, 코닝 -> GLW, 테슬라 -> TSLA, AST 스페이스모바일 -> ASTS, 로켓 랩 -> RKLB, 마벨 테크놀로지 -> MRVL, 스노우플레이크 -> SNOW, 아스테라 랩스 -> ALAB, 앱러빈 -> APP, NASA -> NASA, QQQ -> QQQ 등).
+    1. 종목명: 한글 종목명은 반드시 공식 미국 주식 티커로 변환 (예: 메타 -> META, 엔비디아 -> NVDA, 코닝 -> GLW, 테슬라 -> TSLA, AST 스페이스모바일 -> ASTS, 로켓 랩 -> RKLB, 마벨 테크놀로지 -> MRVL, 스노우플레이크 -> SNOW, 아스테라 랩스 -> ALAB, 앱러빈 -> APP, QQQ -> QQQ 등).
     2. 수량 (quantity): 종목명 아래 '0.005612주' 형태의 소수점 수량을 float 숫자로 추출.
     3. 평가금 (eval) 및 평가손익금 (pnl): 우측에 표시된 금액($) 추출. 손실(-$0.13)은 음수(-0.13), 수익(+$0.50)은 양수(0.50).
     4. 매수 평단가 (buy_price) 역산:
@@ -352,27 +349,21 @@ def parse_portfolio_screenshot(image_bytes: bytes) -> list:
         }
     }
 
-    # 정답 단일 모델(gemini-3.6-flash)로 즉시 요청
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={GEMINI_API_KEY}"
 
     try:
-        # 고용량 원본 처리를 위해 타임아웃을 60초로 넉넉하게 확장
         response = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=60)
-
         if response.status_code == 200:
             result_json = response.json()
             candidates = result_json.get("candidates", [])
             if candidates and "content" in candidates[0]:
                 text_resp = candidates[0]["content"]["parts"][0]["text"].strip()
-
-                # 마크다운 백틱 제거
                 if text_resp.startswith("```json"):
                     text_resp = text_resp[7:]
                 elif text_resp.startswith("```"):
                     text_resp = text_resp[3:]
                 if text_resp.endswith("```"):
                     text_resp = text_resp[:-3]
-
                 return json.loads(text_resp.strip())
         else:
             st.error(f"❌ 구글 AI 서버 응답 오류 (HTTP {response.status_code}): {response.text}")
@@ -380,6 +371,7 @@ def parse_portfolio_screenshot(image_bytes: bytes) -> list:
         st.error(f"❌ 통신 지연 오류: {e}")
 
     return []
+
 
 def load_user_portfolio(user_email: str) -> pd.DataFrame:
     try:
@@ -418,7 +410,6 @@ def delete_user_stock(user_email: str, ticker: str) -> bool:
 
 
 # ==================== 5. 퀀트 분석 엔진 & DB 연동 캐시 ====================
-# 11대 GICS 글로벌 표준 섹터 한글 매핑 (100% 자동 분류)
 GICS_SECTOR_KR = {
     "Technology": "빅테크 & IT",
     "Financial Services": "금융 & 핀테크",
@@ -433,7 +424,6 @@ GICS_SECTOR_KR = {
     "Utilities": "유틸리티 & 전력"
 }
 
-# 주요 종목 한글 검색용 티커 매핑 사전
 KOREAN_TICKER_MAP = {
     "애플": "AAPL", "마이크로소프트": "MSFT", "마소": "MSFT", "엔비디아": "NVDA", "엔비": "NVDA",
     "구글": "GOOGL", "알파벳": "GOOGL", "아마존": "AMZN", "메타": "META", "페이스북": "META",
@@ -487,7 +477,7 @@ def classify_grade(grade_str: str) -> str:
 
 
 def analyze_and_upsert_stock_live(ticker: str):
-    """실시간 분석 후 Supabase stock_analysis 테이블에 Upsert"""
+    """실시간 분석 후 Supabase stock_analysis 테이블에 즉시 강제 덮어쓰기(Upsert)"""
     try:
         session = get_yfinance_session()
         stock = yf.Ticker(ticker, session=session)
@@ -497,7 +487,7 @@ def analyze_and_upsert_stock_live(ticker: str):
 
         current_price = 0.0
         target_mean, target_median, target_high, target_low = 0.0, 0.0, 0.0, 0.0
-        sector = "미분류"
+        sector_kr = "기타"
         
         try:
             info = stock.info
@@ -506,7 +496,10 @@ def analyze_and_upsert_stock_live(ticker: str):
             target_median = float(info.get('targetMedianPrice', target_mean) or 0.0)
             target_high = float(info.get('targetHighPrice', 0.0) or 0.0)
             target_low = float(info.get('targetLowPrice', 0.0) or 0.0)
-            sector = info.get('sector', '미분류')
+            
+            # 1. 11대 GICS 섹터 한글 변환 적용
+            en_sec = info.get('sector', '')
+            sector_kr = GICS_SECTOR_KR.get(en_sec, "기타")
         except Exception:
             pass
 
@@ -527,13 +520,23 @@ def analyze_and_upsert_stock_live(ticker: str):
         try:
             upgrades = stock.upgrades_downgrades
             if upgrades is not None and not upgrades.empty:
-                if upgrades.index.tz is not None:
-                    upgrades.index = upgrades.index.tz_localize(None)
+                # 2. 날짜/인덱스 파싱 버그 수정 (8월 25일 멈춤 방지)
+                df_up = upgrades.copy()
+                if "GradeDate" in df_up.columns:
+                    df_up["Date"] = pd.to_datetime(df_up["GradeDate"])
+                elif "Date" in df_up.columns:
+                    df_up["Date"] = pd.to_datetime(df_up["Date"])
+                else:
+                    df_up["Date"] = pd.to_datetime(df_up.index)
 
-                valid_data = upgrades[upgrades.index >= fourteen_days_ago].sort_index(ascending=False)
+                if df_up["Date"].dt.tz is not None:
+                    df_up["Date"] = df_up["Date"].dt.tz_localize(None)
+
+                valid_data = df_up[df_up["Date"] >= fourteen_days_ago].sort_values(by="Date", ascending=False)
                 seen_firms = set()
 
-                for date, row in valid_data.iterrows():
+                for _, row in valid_data.iterrows():
+                    date_val = row["Date"]
                     firm = str(row.get('Firm', '')).strip()
                     to_grade = str(row.get('ToGrade', ''))
                     action = str(row.get('Action', '')).lower()
@@ -560,11 +563,11 @@ def analyze_and_upsert_stock_live(ticker: str):
                     is_top_tier = is_tier1 or is_tier2
 
                     category = classify_grade(to_grade)
-                    is_within_7d = (date >= seven_days_ago)
+                    is_within_7d = (date_val >= seven_days_ago)
 
                     tier_badge = "👑[1티어]" if is_tier1 else ("⭐[2티어]" if is_tier2 else "[일반]")
                     tp_text = f" (${row_tp:g})" if row_tp is not None else ""
-                    event_text = f"[{date.strftime('%m/%d')}] {tier_badge} {firm}: {to_grade} ({action.upper()}){tp_text}"
+                    event_text = f"[{date_val.strftime('%m/%d')}] {tier_badge} {firm}: {to_grade} ({action.upper()}){tp_text}"
 
                     if is_within_7d:
                         recent_7d_events.append(event_text)
@@ -619,9 +622,10 @@ def analyze_and_upsert_stock_live(ticker: str):
         if top_tier_buyers_14d: top_buyers_all.append(f"8~14일: {', '.join(top_tier_buyers_14d)}")
         buyers_display = " | ".join(top_buyers_all) if top_buyers_all else "-"
 
-        # Supabase stock_analysis DB에 저장
+        # 3. Supabase stock_analysis DB에 저장 (sector 포함)
         row_data = {
             "ticker": ticker,
+            "sector": sector_kr,  # 👈 섹터 데이터 누락 수정
             "score": final_score,
             "current_price": current_price,
             "target_median": target_median,
@@ -644,27 +648,15 @@ def analyze_and_upsert_stock_live(ticker: str):
         except Exception:
             pass
 
-        return {
-            "티커": ticker,
-            "모멘텀 스코어": final_score,
-            "raw_price": current_price,
-            "현재가": f"${current_price:.2f}",
-            "탑티어 14D (B/H/S)": f"{top_14d_buy} / {top_14d_hold} / {top_14d_sell}",
-            "전체 14D (B/H/S)": f"{all_14d_buy} / {all_14d_hold} / {all_14d_sell}",
-            "총 중앙값 (상승여력)": f"${target_median:.2f} (+{upside_median}%)" if target_median else "-",
-            "14D 목표가 평균": f"${avg_14d:.2f}" if avg_14d else "-",
-            "14D 최고/최저": f"${high_14d:.2f} / ${low_14d:.2f}" if (high_14d and low_14d) else "-",
-            "탑티어 매수사": buyers_display,
-            "최근7일내역": recent_7d_events,
-            "8~14일내역": recent_14d_events,
-            "downgrades_7d": recent_downgrades_7d,
-            "hist": hist,
-            "raw_score": final_score,
-            "upside_val": upside_median,
-            "total_reports_count": total_14d_reports,
-            "has_7d": len(recent_7d_events) > 0,
-            "has_14d": total_14d_reports > 0
-        }
+        res_dict = format_db_row_to_display(row_data)
+        res_dict["hist"] = hist
+        return res_dict
+    except Exception:
+        return None
+
+        res_dict = format_db_row_to_display(row_data)
+        res_dict["hist"] = hist
+        return res_dict
     except Exception:
         return None
 
@@ -693,7 +685,7 @@ def format_db_row_to_display(r: dict) -> dict:
     
     return {
         "티커": t,
-        "섹터": r.get("sector", "기타") or "기타", # 👈 DB의 공식 11대 섹터 사용
+        "섹터": r.get("sector", "기타") or "기타",
         "모멘텀 스코어": r["score"],
         "현재가": f"${c_p:.2f}",
         "탑티어 14D (B/H/S)": r.get("top_14d_bhs", "-"),
@@ -713,6 +705,7 @@ def format_db_row_to_display(r: dict) -> dict:
         "has_14d": r.get("has_14d", False),
         "updated_at": r.get("updated_at", "")
     }
+
 
 def render_stock_chart(ticker: str, hist: pd.DataFrame):
     if hist.empty or len(hist) < 20:
@@ -736,8 +729,6 @@ def render_stock_chart(ticker: str, hist: pd.DataFrame):
 
 
 # ==================== 6. 뷰 분기 (인증 게이트) ====================
-
-# [미로그인 상태]
 if not st.session_state["user_email"]:
     st.write("")
     st.write("")
@@ -782,7 +773,7 @@ if not st.session_state["user_email"]:
 
                 google_login_url = None
                 try:
-                    REDIRECT_URL = "https://wallstreet-radar.streamlit.app"
+                    REDIRECT_URL = "[https://wallstreet-radar.streamlit.app](https://wallstreet-radar.streamlit.app)"
                     auth_res = supabase.auth.sign_in_with_oauth({
                         "provider": "google",
                         "options": {"redirect_to": REDIRECT_URL}
@@ -851,8 +842,8 @@ is_public = profile.get("is_portfolio_public", True) if profile else True
 with st.sidebar:
     st.markdown("---")
     if st.button("🔄 최신 데이터 새로고침", use_container_width=True):
-        st.cache_data.clear() # 모든 캐시 초기화
-        st.rerun()            # 화면 다시 로드
+        st.cache_data.clear()
+        st.rerun()
     
     st.markdown("### ⚡ Wall Street Radar")
     st.write(f"👤 아이디: **@{my_username}**")
@@ -914,7 +905,6 @@ if menu == "💼 내 투자 (포트폴리오)":
                             q = float(item.get("quantity", 0.0))
 
                             if t and p > 0 and q > 0:
-                                # DB 덮어쓰기 (기존 티커 삭제 후 새 수량/평단가 삽입)
                                 if save_user_stock(user_email, t, p, q):
                                     analyze_and_upsert_stock_live(t)
                                     success_cnt += 1
@@ -1019,7 +1009,6 @@ if menu == "💼 내 투자 (포트폴리오)":
 elif menu == "👥 친구 포트폴리오":
     st.header("👥 친구 포트폴리오 피드")
 
-    # 1. 받은 친구 요청함 (기본값: 접힘)
     pending_reqs = get_pending_friend_requests(user_email)
     with st.expander(f"📬 받은 친구 요청함 ({len(pending_reqs)}건)", expanded=False):
         if pending_reqs:
@@ -1037,7 +1026,6 @@ elif menu == "👥 친구 포트폴리오":
         else:
             st.caption("새로 도착한 친구 요청이 없습니다.")
 
-    # 2. 새 친구 요청 보내기 (기본값: 접힘)
     with st.expander("➕ 새 친구 요청 보내기", expanded=False):
         c_f1, c_f2 = st.columns([3, 1])
         search_f_uname = c_f1.text_input("요청을 보낼 친구의 아이디(닉네임) 입력", key="f_uname_input").strip()
@@ -1062,7 +1050,6 @@ elif menu == "👥 친구 포트폴리오":
                 else:
                     st.error(f"존재하지 않는 닉네임입니다: '{search_f_uname}'")
 
-    # 3. 내 수락된 친구 목록 및 포트폴리오 뷰어
     friends = get_my_accepted_friends(user_email)
     if friends:
         friend_dict = {f"@{f['username']} ({'공개' if f['is_portfolio_public'] else '비공개'})": f for f in friends}
@@ -1150,7 +1137,6 @@ elif menu == "🔥 7일 내 긴급 상향":
             options=["🏆 모멘텀 점수 높은 순", "⚡ 최근 리포트 순", "📈 목표가 상승여력 순", "📊 14일 총 리포트 수 많은 순"]
         )
         
-        # 11대 GICS 표준 섹터 옵션
         sector_filter = c_sec.selectbox(
             "🏢 섹터 필터",
             options=[
@@ -1160,11 +1146,9 @@ elif menu == "🔥 7일 내 긴급 상향":
             ]
         )
         
-        # 1. 실제 섹터 필터링 수행
         if sector_filter != "전체 섹터":
             urgent_stocks = [s for s in urgent_stocks if s.get("섹터") == sector_filter]
         
-        # 2. 정렬 로직 적용
         if sort_mode == "🏆 모멘텀 점수 높은 순":
             urgent_stocks = sorted(urgent_stocks, key=lambda x: x["raw_score"], reverse=True)
         elif sort_mode == "📈 목표가 상승여력 순":
@@ -1206,26 +1190,29 @@ elif menu == "🔥 7일 내 긴급 상향":
     else:
         st.info("현재 모니터링 풀 내에 최근 7일간 신규 평가가 발표된 종목이 없습니다.")
 
-# -------------------- 5. 🔍 미국 전 종목 직접 검색 & 차트 --------------------
+# -------------------- 4. 🔍 미국 전 종목 직접 검색 & 차트 --------------------
 elif menu == "🔍 미국 전 종목 직접 검색 & 차트":
     st.header("🔍 미국 전 종목 직접 검색 & 차트")
     
-    search_input = st.text_input(
+    col_s1, col_s2 = st.columns([3, 1])
+    search_input = col_s1.text_input(
         "분석할 미국 주식 티커 또는 한글 기업명 입력 (예: 엔비디아, 월마트, PLTR, 테슬라, 애플 등)",
-        value="PLTR"
+        value="PLTR",
+        key="global_search_input"
     ).strip()
     
-    # 한글 입력 시 티커 자동 변환, 영문 입력 시 대문자 변환
     search_ticker = KOREAN_TICKER_MAP.get(search_input, search_input).upper()
     
     if search_input in KOREAN_TICKER_MAP:
         st.caption(f"💡 한글 기업명 감지: **'{search_input}'** ➡️ 티커 **`[{search_ticker}]`** 자동 변환")
+        
+    force_btn = col_s2.button("⚡ 실시간 강제 갱신", use_container_width=True)
     
     if search_ticker:
         res = None
         is_live_updated = False
         
-        with st.spinner(f"⚡ {search_ticker} 최신 월가 리포트 실시간 크롤링 및 DB 갱신 중..."):
+        with st.spinner(f"⚡ '{search_ticker}' 최신 월가 리포트 실시간 분석 및 DB 동기화 중..."):
             res = analyze_and_upsert_stock_live(search_ticker)
             if res:
                 is_live_updated = True
@@ -1240,9 +1227,9 @@ elif menu == "🔍 미국 전 종목 직접 검색 & 차트":
 
         if res:
             if is_live_updated:
-                st.success(f"✅ **{search_ticker}** 최신 월가 리포트 실시간 분석 완료! (DB 갱신됨)")
+                st.success(f"✅ **{search_ticker}** 최신 리포트 분석 완료 및 DB 갱신 성공! (섹터: `{res.get('섹터', '기타')}`)")
             else:
-                st.warning(f"⚠️ 야후 실시간 통신 지연으로 오늘 새벽 정기 분석 데이터(DB)를 표시합니다.")
+                st.warning(f"⚠️ 실시간 통신 지연으로 DB에 저장된 최근 정기 분석 데이터를 표시합니다.")
 
             c1, c2, c3 = st.columns(3)
             c1.metric("14D 모멘텀 스코어", f"{res['모멘텀 스코어']}점")
