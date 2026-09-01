@@ -47,131 +47,7 @@ def hash_pw(password: str) -> str:
     return hashlib.sha256(password.encode('utf-8')).hexdigest()
 
 
-# ==================== 2. OAuth 세션 & OneSignal 웹 푸시 스크립트 ====================
-def inject_onesignal_script(user_email: str):
-    """OneSignal Slidedown 웹 푸시 권한 프롬프트 및 사용자 이메일 태그 등록"""
-    if not ONESIGNAL_APP_ID:
-        return
-    components.html(
-        f"""
-        <script src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js" defer></script>
-        <script>
-          window.OneSignalDeferred = window.OneSignalDeferred || [];
-          OneSignalDeferred.push(async function(OneSignal) {{
-            await OneSignal.init({{
-              appId: "{ONESIGNAL_APP_ID}",
-              allowLocalhostAsSecureOrigin: true,
-              promptOptions: {{
-                slidedown: {{
-                  prompts: [
-                    {{
-                      type: "push",
-                      autoPrompt: true,
-                      text: {{
-                        actionMessage: "월가 1·2티어 기관의 신규 리포트 및 목표가 변동 알림을 받으시겠습니까?",
-                        acceptButton: "알림 켜기",
-                        cancelButton: "나중에"
-                      }}
-                    }}
-                  ]
-                }}
-              }}
-            }});
-            OneSignal.Slidedown.promptPush();
-            if ("{user_email}") {{
-              OneSignal.User.addTag("user_email", "{user_email}");
-            }}
-          }});
-        </script>
-        """,
-        height=0,
-        width=0,
-    )
-
-
-# ==================== 자동 로그인 & 세션 복원 스크립트 ====================
-components.html(
-    """
-    <script>
-    try {
-        const parentLoc = window.parent.location;
-        
-        // 1. 구글 OAuth 해시 토큰 처리
-        if (parentLoc.hash && parentLoc.hash.includes('access_token')) {
-            const hash = parentLoc.hash.substring(1);
-            const params = new URLSearchParams(hash);
-            const accessToken = params.get('access_token');
-            if (accessToken) {
-                parentLoc.href = parentLoc.origin + parentLoc.pathname + '?access_token=' + accessToken;
-            }
-        }
-        
-        // 2. 브라우저 localStorage에 저장된 자동 로그인 토큰 복원
-        const savedUser = localStorage.getItem("ws_auto_login_email");
-        if (savedUser && !parentLoc.search.includes('auto_login=') && !parentLoc.search.includes('access_token=')) {
-            const separator = parentLoc.search ? '&' : '?';
-            parentLoc.href = parentLoc.origin + parentLoc.pathname + parentLoc.search + separator + 'auto_login=' + encodeURIComponent(savedUser);
-        }
-    } catch (e) {
-        console.error(e);
-    }
-    </script>
-    """,
-    height=0,
-    width=0,
-)
-
-if "user_email" not in st.session_state:
-    st.session_state["user_email"] = None
-if "google_auth_email" not in st.session_state:
-    st.session_state["google_auth_email"] = None
-
-# URL 쿼리 파라미터 읽기
-try:
-    token = st.query_params.get("access_token")
-    code = st.query_params.get("code")
-    auto_email = st.query_params.get("auto_login")
-except AttributeError:
-    qp = st.experimental_get_query_params()
-    token = qp.get("access_token", [None])[0]
-    code = qp.get("code", [None])[0]
-    auto_email = qp.get("auto_login", [None])[0]
-
-# 1. 자동 로그인 처리 (localStorage 기반)
-if auto_email and not st.session_state["user_email"]:
-    prof = get_user_profile_by_email(auto_email)
-    if prof:
-        st.session_state["user_email"] = auto_email
-
-# 2. 구글 OAuth 토큰 교환 처리
-if token and not st.session_state["user_email"] and not st.session_state["google_auth_email"]:
-    try:
-        user_res = supabase.auth.get_user(token)
-        if user_res and user_res.user and user_res.user.email:
-            st.session_state["google_auth_email"] = user_res.user.email
-            try:
-                st.query_params.clear()
-            except:
-                st.experimental_set_query_params()
-            st.rerun()
-    except Exception as e:
-        st.error(f"구글 인증 실패: {e}")
-
-if code and not st.session_state["user_email"] and not st.session_state["google_auth_email"]:
-    try:
-        session_res = supabase.auth.exchange_code_for_session({"auth_code": code})
-        if session_res and session_res.user and session_res.user.email:
-            st.session_state["google_auth_email"] = session_res.user.email
-            try:
-                st.query_params.clear()
-            except:
-                st.experimental_set_query_params()
-            st.rerun()
-    except Exception as e:
-        st.error(f"인증 코드 교환 실패: {e}")
-
-
-# ==================== 3. 프로필 & 친구 관리 DB CRUD ====================
+# ==================== 2. 프로필 & 친구 관리 DB CRUD (함수 우선 정의) ====================
 def get_user_profile_by_email(email: str):
     for _ in range(2):
         try:
@@ -233,7 +109,6 @@ def update_privacy_setting(email: str, is_public: bool):
 
 
 def send_friend_request(my_email: str, target_email: str) -> str:
-    """친구 요청 보내기"""
     try:
         res = supabase.table("friendships").select("*").or_(
             f"and(user_email.eq.{my_email},friend_email.eq.{target_email}),and(user_email.eq.{target_email},friend_email.eq.{my_email})"
@@ -260,7 +135,6 @@ def send_friend_request(my_email: str, target_email: str) -> str:
 
 
 def get_pending_friend_requests(my_email: str):
-    """나에게 온 친구 요청 목록 조회"""
     try:
         res = supabase.table("friendships").select("id, user_email, created_at").eq("friend_email", my_email).eq("status", "pending").execute()
         if not res.data:
@@ -283,7 +157,6 @@ def get_pending_friend_requests(my_email: str):
 
 
 def respond_friend_request(my_email: str, sender_email: str, accept: bool) -> bool:
-    """친구 요청 수락 또는 거절"""
     try:
         if accept:
             supabase.table("friendships").update({"status": "accepted"}).eq("user_email", sender_email).eq("friend_email", my_email).execute()
@@ -295,7 +168,6 @@ def respond_friend_request(my_email: str, sender_email: str, accept: bool) -> bo
 
 
 def get_my_accepted_friends(my_email: str):
-    """수락 완료된 상호 친구 목록 조회"""
     try:
         res = supabase.table("friendships").select("user_email, friend_email").eq("status", "accepted").or_(
             f"user_email.eq.{my_email},friend_email.eq.{my_email}"
@@ -319,7 +191,6 @@ def get_my_accepted_friends(my_email: str):
 
 
 def delete_friend_relation(my_email: str, friend_email: str) -> bool:
-    """친구 관계 삭제"""
     try:
         supabase.table("friendships").delete().or_(
             f"and(user_email.eq.{my_email},friend_email.eq.{friend_email}),and(user_email.eq.{friend_email},friend_email.eq.{my_email})"
@@ -329,9 +200,102 @@ def delete_friend_relation(my_email: str, friend_email: str) -> bool:
         return False
 
 
-# ==================== 4. 포트폴리오 DB CRUD & Gemini Vision ====================
+# ==================== 3. 세션 복원 및 자동 로그인 제어 ====================
+if "user_email" not in st.session_state:
+    st.session_state["user_email"] = None
+if "google_auth_email" not in st.session_state:
+    st.session_state["google_auth_email"] = None
 
-# AI 오인식 및 유사 티커를 표준 티커로 강제 변환하는 정규화 사전
+# URL 쿼리 파라미터 읽기
+try:
+    token = st.query_params.get("access_token")
+    code = st.query_params.get("code")
+    url_user = st.query_params.get("user") or st.query_params.get("auto_login")
+except AttributeError:
+    qp = st.experimental_get_query_params()
+    token = qp.get("access_token", [None])[0]
+    code = qp.get("code", [None])[0]
+    url_user = qp.get("user", [None])[0] or qp.get("auto_login", [None])[0]
+
+# 1. URL 파라미터 기반 세션 자동 복원 (새로고침 / 백그라운드 복귀 완벽 대응)
+if url_user and not st.session_state["user_email"]:
+    prof = get_user_profile_by_email(url_user)
+    if prof:
+        st.session_state["user_email"] = url_user
+        try:
+            st.query_params["user"] = url_user
+        except:
+            st.experimental_set_query_params(user=url_user)
+
+# 2. 구글 OAuth 토큰 교환 처리
+if token and not st.session_state["user_email"] and not st.session_state["google_auth_email"]:
+    try:
+        user_res = supabase.auth.get_user(token)
+        if user_res and user_res.user and user_res.user.email:
+            g_email = user_res.user.email
+            existing_prof = get_user_profile_by_email(g_email)
+            if existing_prof:
+                st.session_state["user_email"] = g_email
+                try:
+                    st.query_params.clear()
+                    st.query_params["user"] = g_email
+                except:
+                    st.experimental_set_query_params(user=g_email)
+            else:
+                st.session_state["google_auth_email"] = g_email
+                try:
+                    st.query_params.clear()
+                except:
+                    st.experimental_set_query_params()
+            st.rerun()
+    except Exception as e:
+        st.error(f"구글 인증 실패: {e}")
+
+if code and not st.session_state["user_email"] and not st.session_state["google_auth_email"]:
+    try:
+        session_res = supabase.auth.exchange_code_for_session({"auth_code": code})
+        if session_res and session_res.user and session_res.user.email:
+            g_email = session_res.user.email
+            existing_prof = get_user_profile_by_email(g_email)
+            if existing_prof:
+                st.session_state["user_email"] = g_email
+                try:
+                    st.query_params.clear()
+                    st.query_params["user"] = g_email
+                except:
+                    st.experimental_set_query_params(user=g_email)
+            else:
+                st.session_state["google_auth_email"] = g_email
+                try:
+                    st.query_params.clear()
+                except:
+                    st.experimental_set_query_params()
+            st.rerun()
+    except Exception as e:
+        st.error(f"인증 코드 교환 실패: {e}")
+
+# 3. 브라우저 localStorage 기반 2차 자동 로그인 스크립트
+components.html(
+    """
+    <script>
+    try {
+        const parentLoc = window.parent.location;
+        if (!parentLoc.search.includes('user=')) {
+            const savedUser = localStorage.getItem("ws_auto_login_email");
+            if (savedUser) {
+                const sep = parentLoc.search ? '&' : '?';
+                parentLoc.href = parentLoc.origin + parentLoc.pathname + parentLoc.search + sep + 'user=' + encodeURIComponent(savedUser);
+            }
+        }
+    } catch (e) {}
+    </script>
+    """,
+    height=0,
+    width=0,
+)
+
+
+# ==================== 4. 포트폴리오 DB CRUD & Gemini Vision ====================
 TICKER_CORRECTION_MAP = {
     "SPACEX": "SPCX",
     "SPACE": "SPCX",
@@ -342,13 +306,11 @@ TICKER_CORRECTION_MAP = {
 }
 
 def normalize_ticker(raw_ticker: str) -> str:
-    """티커 공백 제거, 대문자 변환 및 정규화 사전 적용"""
     t = raw_ticker.strip().upper()
     return TICKER_CORRECTION_MAP.get(t, t)
 
 
 def parse_portfolio_screenshot(image_bytes: bytes) -> list:
-    """Gemini Vision API를 호출하여 원본 해상도 그대로 종목명, 수량, 매수가 역산 추출"""
     if not GEMINI_API_KEY:
         st.error("❌ GEMINI_API_KEY가 설정되지 않았습니다. Streamlit Secrets를 확인해주세요.")
         return []
@@ -416,8 +378,6 @@ def parse_portfolio_screenshot(image_bytes: bytes) -> list:
                     text_resp = text_resp[:-3]
                 
                 raw_list = json.loads(text_resp.strip())
-                
-                # ⚡ 파이썬 레벨에서 2차 티커 정규화 적용
                 cleaned_list = []
                 for item in raw_list:
                     raw_t = str(item.get("ticker", ""))
@@ -537,7 +497,6 @@ def classify_grade(grade_str: str) -> str:
 
 
 def analyze_and_upsert_stock_live(ticker: str):
-    """실시간 분석 후 Supabase stock_analysis 테이블에 즉시 강제 덮어쓰기(Upsert)"""
     try:
         session = get_yfinance_session()
         stock = yf.Ticker(ticker, session=session)
@@ -680,7 +639,6 @@ def analyze_and_upsert_stock_live(ticker: str):
         if top_tier_buyers_14d: top_buyers_all.append(f"8~14일: {', '.join(top_tier_buyers_14d)}")
         buyers_display = " | ".join(top_buyers_all) if top_buyers_all else "-"
 
-        # Supabase stock_analysis DB에 저장 (sector 포함)
         row_data = {
             "ticker": ticker,
             "sector": sector_kr,
@@ -715,7 +673,6 @@ def analyze_and_upsert_stock_live(ticker: str):
 
 @st.cache_data(ttl=60)
 def get_all_db_stock_analysis():
-    """Supabase stock_analysis 테이블에서 520+ 전 종목 분석 결과 로드"""
     try:
         res = supabase.table("stock_analysis").select("*").order("score", desc=True).execute()
         if res.data:
@@ -814,12 +771,14 @@ if not st.session_state["user_email"]:
                         if user_prof:
                             u_email = user_prof["user_email"]
                             st.session_state["user_email"] = u_email
-                            
-                            # 브라우저에 영구 로그인 토큰 저장
+                            try:
+                                st.query_params["user"] = u_email
+                            except:
+                                st.experimental_set_query_params(user=u_email)
+                                
                             components.html(f"""
                             <script>
                                 localStorage.setItem("ws_auto_login_email", "{u_email}");
-                                window.parent.location.href = window.parent.location.origin + window.parent.location.pathname + '?auto_login={u_email}';
                             </script>
                             """, height=0)
                             st.rerun()
@@ -885,12 +844,14 @@ if not st.session_state["user_email"]:
                                 if register_user(g_email, reg_uname, reg_pwd):
                                     st.session_state["user_email"] = g_email
                                     st.session_state["google_auth_email"] = None
-                                    
-                                    # 브라우저에 영구 로그인 토큰 저장
+                                    try:
+                                        st.query_params["user"] = g_email
+                                    except:
+                                        st.experimental_set_query_params(user=g_email)
+                                        
                                     components.html(f"""
                                     <script>
                                         localStorage.setItem("ws_auto_login_email", "{g_email}");
-                                        window.parent.location.href = window.parent.location.origin + window.parent.location.pathname + '?auto_login={g_email}';
                                     </script>
                                     """, height=0)
                                     st.rerun()
@@ -899,6 +860,46 @@ if not st.session_state["user_email"]:
 # ==================== 7. 메인 대시보드 (로그인 완료) ====================
 user_email = st.session_state["user_email"]
 profile = get_user_profile_by_email(user_email)
+
+# OneSignal 푸시 스크립트 실행
+def inject_onesignal_script(user_email: str):
+    if not ONESIGNAL_APP_ID:
+        return
+    components.html(
+        f"""
+        <script src="[https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js](https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js)" defer></script>
+        <script>
+          window.OneSignalDeferred = window.OneSignalDeferred || [];
+          OneSignalDeferred.push(async function(OneSignal) {{
+            await OneSignal.init({{
+              appId: "{ONESIGNAL_APP_ID}",
+              allowLocalhostAsSecureOrigin: true,
+              promptOptions: {{
+                slidedown: {{
+                  prompts: [
+                    {{
+                      type: "push",
+                      autoPrompt: true,
+                      text: {{
+                        actionMessage: "월가 1·2티어 기관의 신규 리포트 및 목표가 변동 알림을 받으시겠습니까?",
+                        acceptButton: "알림 켜기",
+                        cancelButton: "나중에"
+                      }}
+                    }}
+                  ]
+                }}
+              }}
+            }});
+            OneSignal.Slidedown.promptPush();
+            if ("{user_email}") {{
+              OneSignal.User.addTag("user_email", "{user_email}");
+            }}
+          }});
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
 
 inject_onesignal_script(user_email)
 
@@ -928,19 +929,17 @@ with st.sidebar:
             pass
         st.session_state["user_email"] = None
         st.session_state["google_auth_email"] = None
-        
-        # 브라우저 저장소의 로그인 토큰 삭제 후 메인으로 이동
+        try:
+            st.query_params.clear()
+        except:
+            st.experimental_set_query_params()
+            
         components.html("""
         <script>
             localStorage.removeItem("ws_auto_login_email");
             window.parent.location.href = window.parent.location.origin + window.parent.location.pathname;
         </script>
         """, height=0)
-        
-        try:
-            st.query_params.clear()
-        except:
-            st.experimental_set_query_params()
         st.rerun()
 
     st.markdown("---")
@@ -960,7 +959,6 @@ if menu == "💼 내 투자 (포트폴리오)":
     with st.expander("➕ 보유 종목 추가 / 수정 / 삭제", expanded=port_df.empty):
         tab_img, tab_manual = st.tabs(["📸 토스증권 스크린샷 자동 등록", "✍️ 직접 수동 입력"])
 
-        # [탭 1] 스크린샷 업로드 & 자동 등록
         with tab_img:
             st.caption("💡 토스증권의 **[평가금 / $]** 보유 화면 캡처 이미지를 업로드하면 전 종목을 자동 인식하여 DB에 덮어씁니다.")
             uploaded_file = st.file_uploader("토스증권 스크린샷 업로드", type=["png", "jpg", "jpeg"], key="toss_uploader")
@@ -990,7 +988,6 @@ if menu == "💼 내 투자 (포트폴리오)":
                     else:
                         st.warning("이미지에서 주식 정보를 인식하지 못했습니다. 선명한 스크린샷인지 확인해주세요.")
 
-        # [탭 2] 기존 수동 입력 및 삭제
         with tab_manual:
             col_in1, col_in2, col_in3, col_in4 = st.columns([2, 2, 2, 1.5])
             in_ticker = col_in1.text_input("티커 (예: NVDA)", key="in_t").strip().upper()
