@@ -330,6 +330,23 @@ def delete_friend_relation(my_email: str, friend_email: str) -> bool:
 
 
 # ==================== 4. 포트폴리오 DB CRUD & Gemini Vision ====================
+
+# AI 오인식 및 유사 티커를 표준 티커로 강제 변환하는 정규화 사전
+TICKER_CORRECTION_MAP = {
+    "SPACEX": "SPCX",
+    "SPACE": "SPCX",
+    "SANDISK": "SNDK",
+    "FB": "META",
+    "GOOGLE": "GOOGL",
+    "GOOGLEL": "GOOGL"
+}
+
+def normalize_ticker(raw_ticker: str) -> str:
+    """티커 공백 제거, 대문자 변환 및 정규화 사전 적용"""
+    t = raw_ticker.strip().upper()
+    return TICKER_CORRECTION_MAP.get(t, t)
+
+
 def parse_portfolio_screenshot(image_bytes: bytes) -> list:
     """Gemini Vision API를 호출하여 원본 해상도 그대로 종목명, 수량, 매수가 역산 추출"""
     if not GEMINI_API_KEY:
@@ -341,9 +358,22 @@ def parse_portfolio_screenshot(image_bytes: bytes) -> list:
     prompt = """
     당신은 금융 데이터 추출 전문가입니다. 제공된 토스증권 주식 보유 화면 스크린샷을 분석하여 각 보유 종목의 데이터를 JSON 배열로 추출하세요.
 
-    [추출 및 계산 규칙]
-    1. 종목명: 한글 종목명은 반드시 공식 미국 주식 티커로 변환 (예: 메타 -> META, 샌디스크 -> SNDK, 엔비디아 -> NVDA, 코닝 -> GLW, 테슬라 -> TSLA, AST 스페이스모바일 -> ASTS, 로켓 랩 -> RKLB, 마벨 테크놀로지 -> MRVL, 스노우플레이크 -> SNOW, 아스테라 랩스 -> ALAB, 앱러빈 -> APP, QQQ -> QQQ 등).
-    2. 수량 (quantity): 종목명 아래 '0.005612주' 형태의 소수점 수량을 float 숫자로 추출.
+    [추출 및 티커 매핑 필수 규칙]
+    1. 종목명 ➡️ 공식 미국 주식/ETF 티커로 정확히 변환:
+       - 스페이스X / SPACE X ➡️ "SPCX" (절대 SPACEX, SPACE로 쓰지 말 것)
+       - 샌디스크 ➡️ "SNDK"
+       - 메타 ➡️ "META"
+       - 엔비디아 ➡️ "NVDA"
+       - 코닝 ➡️ "GLW"
+       - 테슬라 ➡️ "TSLA"
+       - AST 스페이스모바일 ➡️ "ASTS"
+       - 로켓 랩 ➡️ "RKLB"
+       - 마벨 테크놀로지 ➡️ "MRVL"
+       - 스노우플레이크 ➡️ "SNOW"
+       - 아스테라 랩스 ➡️ "ALAB"
+       - 앱러빈 ➡️ "APP"
+       - 나스닥100 / QQQ ➡️ "QQQ"
+    2. 수량 (quantity): 종목명 아래 '0.005612주', '21.0주' 형태의 소수점 수량을 float 숫자로 추출.
     3. 평가금 (eval) 및 평가손익금 (pnl): 우측에 표시된 금액($) 추출. 손실(-$0.13)은 음수(-0.13), 수익(+$0.50)은 양수(0.50).
     4. 매수 평단가 (buy_price) 역산:
        - 공식: (eval - pnl) / quantity
@@ -352,7 +382,7 @@ def parse_portfolio_screenshot(image_bytes: bytes) -> list:
 
     [출력 JSON 예시]
     [
-      {"ticker": "META", "buy_price": 600.50, "quantity": 0.005612},
+      {"ticker": "SPCX", "buy_price": 152.35, "quantity": 21.0},
       {"ticker": "NVDA", "buy_price": 214.45, "quantity": 0.166099}
     ]
     """
@@ -384,7 +414,17 @@ def parse_portfolio_screenshot(image_bytes: bytes) -> list:
                     text_resp = text_resp[3:]
                 if text_resp.endswith("```"):
                     text_resp = text_resp[:-3]
-                return json.loads(text_resp.strip())
+                
+                raw_list = json.loads(text_resp.strip())
+                
+                # ⚡ 파이썬 레벨에서 2차 티커 정규화 적용
+                cleaned_list = []
+                for item in raw_list:
+                    raw_t = str(item.get("ticker", ""))
+                    item["ticker"] = normalize_ticker(raw_t)
+                    cleaned_list.append(item)
+                    
+                return cleaned_list
         else:
             st.error(f"❌ 구글 AI 서버 응답 오류 (HTTP {response.status_code}): {response.text}")
     except Exception as e:
